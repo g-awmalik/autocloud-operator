@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autocloud-github-action"
+version = "0.1.0"
+description = "AutoCloud Operator GitHub Action & CLI Setup Wizard (Option 1)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "absl-py>=2.0.0",
+  "PyYAML>=6.0.1",
+  "requests>=2.31.0",
+]
+
+[project.scripts]
+autocloud-github-init = "autocloud_github.cli_init:run"
+autocloud-github-runner = "autocloud_github.runner_main:run"
