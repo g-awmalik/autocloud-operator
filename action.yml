@@ -14,7 +14,7 @@ inputs:
   mcp_url:
     description: 'HTTPS endpoint for Gemini Cloud Assist MCP server.'
     required: false
-    default: 'https://geminicloudassist.sandbox.googleapis.com/mcp'
+    default: 'https://geminicloudassist.googleapis.com/mcp'
 
 runs:
   using: 'composite'
