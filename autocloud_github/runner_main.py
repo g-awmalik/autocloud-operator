@@ -182,7 +182,12 @@ def run_action(
     prior_comments = github_client.list_issue_comments(
         repo_full_name, pr_number
     )
-    prior_context_id = parser.extract_context_id_marker(prior_comments)
+    prior_reviews = github_client.list_pr_review_bodies(
+        repo_full_name, pr_number
+    )
+    prior_context_id = parser.extract_context_id_marker(
+        [*prior_comments, *prior_reviews]
+    )
   else:
     raise ValueError(
         'Either --changed_files or a live GitHubClient must be provided.'
@@ -195,12 +200,14 @@ def run_action(
     )
     return 0
 
+  pr_mode = repo_cfg.scenarios.code_changes.pr_mode
   prompt = mcp_client.build_pr_review_prompt(
       project_id=repo_cfg.project_id,
       repo_full_name=repo_full_name or 'local/smoke-test',
       pr_number=pr_number,
       pr_title=pr_title,
       changed_files=changed_files,
+      pr_mode=pr_mode,
   )
 
   answer = mcp_client.ask_cloud_operator(
@@ -213,11 +220,26 @@ def run_action(
   )
 
   remediated = parser.extract_remediated_files(answer.content)
+  explicit_inline = parser.extract_inline_comments(answer.content)
+  covered_paths = {item.path for item in explicit_inline}
+  unmatched_remediated = [
+      rem for rem in remediated if rem.path not in covered_paths
+  ]
+  diff_inline = parser.build_inline_comments_from_remediated_files(
+      changed_files, unmatched_remediated
+  )
+  all_inline = [*explicit_inline, *diff_inline]
+
   logging.info(
-      'Received AutoCloud review (context_id=%s, remediated_files=%d).',
+      'Received AutoCloud review (context_id=%s, pr_mode=%s, '
+      'inline_comments=%d, remediated_files=%d).',
       answer.context_id,
+      pr_mode,
+      len(all_inline),
       len(remediated),
   )
+
+  clean_summary = parser.strip_inline_comments_json_block(answer.content)
 
   if dry_run_github:
     if remediated:
@@ -225,14 +247,27 @@ def run_action(
           workspace_dir, remediated
       )
       logging.info('Dry-run wrote remediated files locally: %s', written)
-    logging.info('Dry-run review summary:\n%s', answer.content)
+    logging.info('Dry-run inline comments count: %d', len(all_inline))
+    logging.info('Dry-run review summary:\n%s', clean_summary)
     return 0
 
   if github_client is None:
     raise RuntimeError('github_client is required when dry_run_github=False.')
 
+  if pr_mode == 'inline_comments':
+    review_body_with_ctx = parser.embed_context_id_marker(
+        clean_summary, answer.context_id
+    )
+    github_client.post_pr_review(
+        repo_full_name,
+        pr_number,
+        review_body_with_ctx,
+        inline_comments=all_inline,
+    )
+    return 0
+
   companion_url = ''
-  if remediated and pr_head_branch:
+  if pr_mode == 'companion_pr' and remediated and pr_head_branch:
     written = github_pr.write_remediated_files_safely(workspace_dir, remediated)
     companion_branch = github_pr.companion_branch_for_pr(pr_number)
     pushed = github_pr.commit_and_push_companion_branch(
@@ -248,10 +283,10 @@ def run_action(
           source_pr_number=pr_number,
           pr_head_branch=pr_head_branch,
           companion_branch=companion_branch,
-          summary_markdown=answer.content,
+          summary_markdown=clean_summary,
       )
 
-  comment_body = answer.content
+  comment_body = clean_summary
   if companion_url:
     comment_body = (
         f'### AutoCloud Companion PR Opened: {companion_url}\n\n'

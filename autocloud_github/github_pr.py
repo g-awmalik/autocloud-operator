@@ -322,6 +322,24 @@ class GitHubClient:
         if isinstance(item, dict) and item.get('body')
     ]
 
+  def list_pr_review_bodies(
+      self, repo_full_name: str, pr_number: int
+  ) -> list[str]:
+    """Lists chronological Pull Request review body strings on a PR."""
+    safe_repo = validate_repo_full_name(repo_full_name)
+    items = self._request_json(
+        'GET',
+        f'/repos/{safe_repo}/pulls/{pr_number}/reviews',
+        params={'per_page': 100},
+    )
+    if not isinstance(items, list):
+      return []
+    return [
+        str(item.get('body', ''))
+        for item in items
+        if isinstance(item, dict) and item.get('body')
+    ]
+
   def post_issue_comment(
       self, repo_full_name: str, issue_number: int, body: str
   ) -> str:
@@ -335,6 +353,84 @@ class GitHubClient:
     if isinstance(resp, dict):
       return str(resp.get('html_url', ''))
     return ''
+
+  def post_pr_review(
+      self,
+      repo_full_name: str,
+      pr_number: int,
+      body: str,
+      inline_comments: Sequence[parser.InlineReviewComment] = (),
+  ) -> str:
+    """Posts a Pull Request Review with optional line-anchored inline comments.
+
+    Uses `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` (`event:
+    "COMMENT"`). If GitHub rejects the inline comments array (e.g. HTTP 422 when
+    a line number falls outside the PR diff hunk), falls back to posting the
+    review summary and inline suggestions in a top-level PR comment so findings
+    are never lost.
+
+    Args:
+      repo_full_name: GitHub `owner/repo` string.
+      pr_number: Pull Request number.
+      body: Top-level review summary body (including `context_id` marker).
+      inline_comments: Line-anchored `InlineReviewComment` items.
+
+    Returns:
+      HTML URL of the created Pull Request review or fallback comment.
+    """
+    safe_repo = validate_repo_full_name(repo_full_name)
+    serialized_comments: list[dict[str, Any]] = []
+    for item in inline_comments:
+      try:
+        safe_path = parser.sanitize_relative_repo_path(item.path)
+      except ValueError:
+        continue
+      if item.line < 1 or not item.body.strip():
+        continue
+      entry: dict[str, Any] = {
+          'path': safe_path,
+          'line': item.line,
+          'side': 'RIGHT',
+          'body': item.body,
+      }
+      if item.start_line is not None and 1 <= item.start_line < item.line:
+        entry['start_line'] = item.start_line
+        entry['start_side'] = 'RIGHT'
+      serialized_comments.append(entry)
+
+    review_payload: dict[str, Any] = {
+        'event': 'COMMENT',
+        'body': body,
+    }
+    if serialized_comments:
+      review_payload['comments'] = serialized_comments
+
+    try:
+      resp = self._request_json(
+          'POST',
+          f'/repos/{safe_repo}/pulls/{pr_number}/reviews',
+          json_body=review_payload,
+      )
+      if isinstance(resp, dict):
+        return str(resp.get('html_url', ''))
+      return ''
+    except GitHubIntegrationError as err:
+      if not serialized_comments:
+        raise
+      logging.warning(
+          'Inline PR review returned %s; falling back to PR comment.', err
+      )
+      fallback_sections = [body]
+      for cmt in serialized_comments:
+        loc = (
+            f"{cmt['path']}:L{cmt['start_line']}-L{cmt['line']}"
+            if 'start_line' in cmt
+            else f"{cmt['path']}:L{cmt['line']}"
+        )
+        fallback_sections.append(f"#### `{loc}`\n{cmt['body']}")
+      return self.post_issue_comment(
+          safe_repo, pr_number, '\n\n'.join(fallback_sections)
+      )
 
   def create_or_update_companion_pr(
       self,

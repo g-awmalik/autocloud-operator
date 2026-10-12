@@ -12,6 +12,7 @@ sanitization against directory traversal (`..`) and protected `.git/` or
 
 from collections.abc import Mapping, Sequence
 import dataclasses
+import difflib
 import json
 import posixpath
 import re
@@ -28,6 +29,14 @@ _CONTEXT_ID_MARKER_RE = re.compile(
 _FENCED_FILE_BLOCK_RE = re.compile(
     r'```[a-zA-Z0-9_-]*'
     r'(?:\s+(?:title|file|path)=["\']?([^"\'\n`]+)["\']?|:([^\s\n`]+))'
+    r'\s*\n(.*?)```',
+    re.DOTALL,
+)
+
+# Matches a fenced JSON block containing structured inline PR review comments:
+#   ```json title="autocloud-inline-comments"
+_INLINE_COMMENTS_BLOCK_RE = re.compile(
+    r'```(?:json)?\s+(?:title|file|path)=["\']?autocloud-inline-comments["\']?'
     r'\s*\n(.*?)```',
     re.DOTALL,
 )
@@ -70,6 +79,16 @@ class RemediatedFile:
 
   path: str
   content: str
+
+
+@dataclasses.dataclass(frozen=True)
+class InlineReviewComment:
+  """A line-anchored GitHub Pull Request inline review comment."""
+
+  path: str
+  line: int
+  body: str
+  start_line: int | None = None
 
 
 def parse_sse(raw_body: str) -> str:
@@ -287,7 +306,9 @@ def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
   by_path: dict[str, RemediatedFile] = {}
 
   for match in _FENCED_FILE_BLOCK_RE.finditer(markdown_text):
-    raw_path = match.group(1) or match.group(2) or ''
+    raw_path = (match.group(1) or match.group(2) or '').strip()
+    if raw_path == 'autocloud-inline-comments':
+      continue
     code_body = match.group(3)
     try:
       safe_path = sanitize_relative_repo_path(raw_path)
@@ -306,6 +327,163 @@ def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
       by_path[safe_path] = RemediatedFile(path=safe_path, content=code_body)
 
   return list(by_path.values())
+
+
+def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
+  """Extracts structured inline PR review comments from the agent's response.
+
+  Parses `title="autocloud-inline-comments"` JSON code blocks containing a list
+  of comment objects (`path`, `line`, optional `start_line`, `body`, and
+  optional `suggestion`).
+
+  Args:
+    markdown_text: Full markdown response from `ask_cloud_operator`.
+
+  Returns:
+    List of validated `InlineReviewComment` objects.
+  """
+  comments: list[InlineReviewComment] = []
+  for match in _INLINE_COMMENTS_BLOCK_RE.finditer(markdown_text):
+    raw_json = match.group(1).strip()
+    parsed = _maybe_json(raw_json)
+    if isinstance(parsed, Mapping) and isinstance(
+        parsed.get('comments'), Sequence
+    ):
+      items = parsed['comments']
+    elif isinstance(parsed, Sequence):
+      items = parsed
+    else:
+      continue
+
+    for item in items:
+      if not isinstance(item, Mapping):
+        continue
+      raw_path = str(item.get('path') or item.get('file') or '').strip()
+      try:
+        safe_path = sanitize_relative_repo_path(raw_path)
+      except ValueError:
+        continue
+      try:
+        line = int(item.get('line', 0) or 0)
+      except (TypeError, ValueError):
+        continue
+      if line < 1:
+        continue
+
+      start_line_val: int | None = None
+      raw_start = item.get('start_line')
+      if raw_start is not None:
+        try:
+          cand_start = int(raw_start)
+          if 1 <= cand_start < line:
+            start_line_val = cand_start
+        except (TypeError, ValueError):
+          start_line_val = None
+
+      body = str(item.get('body') or item.get('comment') or '').strip()
+      suggestion = item.get('suggestion')
+      if isinstance(suggestion, str) and '```suggestion' not in body:
+        clean_sugg = suggestion.rstrip('\n')
+        body = (
+            f'{body}\n\n```suggestion\n{clean_sugg}\n```'
+            if body
+            else f'```suggestion\n{clean_sugg}\n```'
+        )
+      if not body:
+        continue
+
+      comments.append(
+          InlineReviewComment(
+              path=safe_path,
+              line=line,
+              body=body,
+              start_line=start_line_val,
+          )
+      )
+  return comments
+
+
+def build_inline_comments_from_remediated_files(
+    original_files: Mapping[str, str],
+    remediated_files: Sequence[RemediatedFile],
+) -> list[InlineReviewComment]:
+  """Computes line-anchored GitHub `suggestion` comments by diffing files.
+
+  When the agent emits complete remediated file blocks (`title="<path>"`), this
+  function diffs each remediated file against its original PR content and builds
+  inline review comments with native GitHub ````suggestion` blocks anchored to
+  the exact 1-based line ranges in the existing PR.
+
+  Args:
+    original_files: Mapping of relative file paths to original PR file contents.
+    remediated_files: Sequence of `RemediatedFile` objects from the agent.
+
+  Returns:
+    List of `InlineReviewComment` objects with GitHub ````suggestion` blocks.
+  """
+  inline_comments: list[InlineReviewComment] = []
+  for rem in remediated_files:
+    orig_text = original_files.get(rem.path)
+    if orig_text is None:
+      continue
+    orig_lines = orig_text.splitlines()
+    rem_lines = rem.content.splitlines()
+    if orig_lines == rem_lines or not orig_lines:
+      continue
+
+    matcher = difflib.SequenceMatcher(a=orig_lines, b=rem_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+      if tag == 'equal':
+        continue
+      replacement = '\n'.join(rem_lines[j1:j2])
+      if tag in ('replace', 'delete'):
+        start_1 = i1 + 1
+        end_1 = max(start_1, i2)
+        start_line = start_1 if start_1 < end_1 else None
+        line = end_1
+        sugg_body = (
+            '**AutoCloud Suggested Remediation:**\n'
+            f'```suggestion\n{replacement}\n```'
+        )
+      else:
+        # Pure insertion (`tag == 'insert'`): anchor to the line at i1 (or 1)
+        # and include that anchor line in the suggestion block so GitHub
+        # replaces 1 line with (anchor line + inserted lines).
+        anchor_idx = min(max(i1 - 1, 0), len(orig_lines) - 1)
+        line = anchor_idx + 1
+        start_line = None
+        if i1 == 0:
+          combined = (
+              f'{replacement}\n{orig_lines[0]}'
+              if replacement
+              else orig_lines[0]
+          )
+        else:
+          combined = (
+              f'{orig_lines[anchor_idx]}\n{replacement}'
+              if replacement
+              else orig_lines[anchor_idx]
+          )
+        sugg_body = (
+            '**AutoCloud Suggested Addition:**\n'
+            f'```suggestion\n{combined}\n```'
+        )
+
+      inline_comments.append(
+          InlineReviewComment(
+              path=rem.path,
+              line=line,
+              body=sugg_body,
+              start_line=start_line,
+          )
+      )
+  return inline_comments
+
+
+def strip_inline_comments_json_block(markdown_text: str) -> str:
+  """Removes the machine-readable `autocloud-inline-comments` block."""
+  cleaned = _INLINE_COMMENTS_BLOCK_RE.sub('', markdown_text).strip()
+  return cleaned or markdown_text.strip()
 
 
 def embed_context_id_marker(

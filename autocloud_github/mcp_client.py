@@ -43,12 +43,13 @@ def build_pr_review_prompt(
     pr_number: int,
     pr_title: str,
     changed_files: Mapping[str, str],
+    pr_mode: str = 'inline_comments',
 ) -> str:
   """Constructs the Option 1 IaC & code review prompt for `ask_cloud_operator`.
 
   Bundles modified repository files inline and instructs the AutoCloud
   Operator agent to evaluate changes using progressive disclosure (`docs/`) and
-  emit complete remediated files using `title="<path>"` fenced blocks.
+  emit inline review comments and/or complete remediated files.
 
   Args:
     project_id: Target GCP project ID (e.g., `g4g-operate-demo`).
@@ -56,6 +57,7 @@ def build_pr_review_prompt(
     pr_number: Pull Request number.
     pr_title: Pull Request title.
     changed_files: Mapping of relative file paths to full file contents.
+    pr_mode: Delivery mode (`inline_comments`, `companion_pr`, `comment_only`).
 
   Returns:
     Formatted prompt string for `ask_cloud_operator`.
@@ -67,6 +69,17 @@ def build_pr_review_prompt(
     )
   bundled_files_str = '\n\n'.join(file_sections)
 
+  inline_instr = ''
+  if pr_mode == 'inline_comments':
+    inline_instr = (
+        '3. A fenced JSON block (` ```json title="autocloud-inline-comments"`) '
+        'containing a JSON array of line-anchored inline comments for the PR '
+        'diff, where each item has `{"path": "<relative_path>", "line": '
+        '<1_based_end_line>, "start_line": <optional_1_based_start_line>, '
+        '"body": "<explanation>", "suggestion": "<optional_replacement_code>"}`'
+        '.\n'
+    )
+
   return (
       f'Review Pull Request #{pr_number} ("{pr_title}") in GitHub repository '
       f'`{repo_full_name}` against Google Cloud project `{project_id}`.\n\n'
@@ -77,7 +90,8 @@ def build_pr_review_prompt(
       '1. A concise markdown summary of findings and recommendations.\n'
       '2. The COMPLETE remediated content for each modified file that needs '
       'changes, formatted inside a fenced code block with `title="<path>"` '
-      '(for example: ```hcl title="envs/prod/main.tf").\n\n'
+      '(for example: ```hcl title="envs/prod/main.tf").\n'
+      f'{inline_instr}\n'
       f'## Modified Files in PR #{pr_number}\n\n{bundled_files_str}'
   )
 

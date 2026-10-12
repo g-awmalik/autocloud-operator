@@ -23,6 +23,12 @@ ALLOWED_ISSUE_TRIGGERS = frozenset({
     'issue_comment.created',
 })
 
+ALLOWED_PR_MODES = frozenset({
+    'inline_comments',
+    'companion_pr',
+    'comment_only',
+})
+
 COMPANION_BRANCH_PREFIX = 'autocloud/remediate-pr-'
 
 
@@ -41,7 +47,7 @@ class CodeChangesConfig:
       'issue_comment.created',
   )
   trigger_command: str = '/autocloud review'
-  pr_mode: str = 'companion_pr'
+  pr_mode: str = 'inline_comments'
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,10 +115,11 @@ def _parse_code_changes(raw_map: Mapping[str, Any]) -> CodeChangesConfig:
   trigger_command = str(
       raw_map.get('trigger_command', '/autocloud review')
   ).strip()
-  pr_mode = str(raw_map.get('pr_mode', 'companion_pr')).strip()
-  if pr_mode != 'companion_pr':
+  pr_mode = str(raw_map.get('pr_mode', 'inline_comments')).strip()
+  if pr_mode not in ALLOWED_PR_MODES:
     raise ConfigValidationError(
-        f'Unsupported pr_mode: {pr_mode!r}. Expected "companion_pr".'
+        f'Unsupported pr_mode: {pr_mode!r}. '
+        f'Allowed: {sorted(ALLOWED_PR_MODES)}'
     )
   return CodeChangesConfig(
       enabled=enabled,
@@ -125,6 +132,11 @@ def _parse_code_changes(raw_map: Mapping[str, Any]) -> CodeChangesConfig:
 def _parse_issue_impl(raw_map: Mapping[str, Any]) -> IssueImplementationConfig:
   """Parses and validates the `scenarios.issue_implementation` block."""
   enabled = bool(raw_map.get('enabled', False))
+  if enabled:
+    raise ConfigValidationError(
+        'scenarios.issue_implementation is a work in progress and is not '
+        'available yet (enabled must be false).'
+    )
   raw_triggers = raw_map.get(
       'triggers', ['issues.labeled', 'issue_comment.created']
   )
