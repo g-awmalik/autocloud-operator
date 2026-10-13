@@ -16,6 +16,96 @@ DEFAULT_GITHUB_API_URL = 'https://api.github.com'
 _GITHUB_TIMEOUT_SECONDS = 30
 _BRANCH_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$')
 _REPO_FULL_NAME_RE = re.compile(r'^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$')
+_HUNK_HEADER_RE = re.compile(
+    r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', re.MULTILINE
+)
+
+
+def parse_patch_right_hunks(patch_text: str) -> list[tuple[int, int]]:
+  """Extracts 1-based inclusive `(start_line, end_line)` right-side diff hunks.
+
+  Args:
+    patch_text: Unified diff `patch` string returned by GitHub's PR files API.
+
+  Returns:
+    List of `(start_line, end_line)` ranges valid on `side: "RIGHT"`.
+  """
+  hunks: list[tuple[int, int]] = []
+  for match in _HUNK_HEADER_RE.finditer(patch_text or ''):
+    start_line = int(match.group(1))
+    count = int(match.group(2)) if match.group(2) is not None else 1
+    if count <= 0:
+      continue
+    hunks.append((start_line, start_line + count - 1))
+  return hunks
+
+
+def _align_comment_to_hunks(
+    entry: dict[str, Any],
+    hunks: Sequence[tuple[int, int]],
+) -> dict[str, Any] | None:
+  """Aligns and clamps a serialized inline comment dict to valid PR diff hunks.
+
+  GitHub's Pull Request Review API (`POST /repos/{owner}/{repo}/pulls/{n}/reviews`)
+  rejects the entire review request with HTTP 422 if any comment's `line` or
+  `start_line` falls outside a diff hunk or spans across two separate hunks.
+
+  Args:
+    entry: Serialized GitHub review comment dictionary.
+    hunks: Valid right-side `(start_line, end_line)` hunks for `entry['path']`.
+
+  Returns:
+    Aligned comment dictionary ready for GitHub's API, or None if the comment
+    targets lines outside the PR diff hunks.
+  """
+  if not hunks:
+    return None
+
+  line = int(entry['line'])
+  raw_start = entry.get('start_line')
+  start_line = int(raw_start) if raw_start is not None else None
+  max_hunk_line = max(h_end for _, h_end in hunks)
+
+  if line > max_hunk_line:
+    if hunks == [(1, max_hunk_line)]:
+      overshoot = line - max_hunk_line
+      line = max_hunk_line
+      if start_line is not None:
+        start_line = max(1, start_line - overshoot)
+    elif start_line is not None:
+      for h_start, h_end in hunks:
+        if h_start <= start_line <= h_end:
+          line = h_end
+          break
+
+  for h_start, h_end in hunks:
+    if h_start <= line <= h_end:
+      aligned = dict(entry)
+      aligned['line'] = line
+      if start_line is not None:
+        clamped_start = max(h_start, min(start_line, line))
+        if 1 <= clamped_start < line:
+          aligned['start_line'] = clamped_start
+          aligned['start_side'] = 'RIGHT'
+        else:
+          aligned.pop('start_line', None)
+          aligned.pop('start_side', None)
+      return aligned
+
+  if start_line is not None:
+    for h_start, h_end in hunks:
+      if h_start <= start_line <= h_end and line > h_end:
+        aligned = dict(entry)
+        aligned['line'] = h_end
+        if 1 <= start_line < h_end:
+          aligned['start_line'] = start_line
+          aligned['start_side'] = 'RIGHT'
+        else:
+          aligned.pop('start_line', None)
+          aligned.pop('start_side', None)
+        return aligned
+
+  return None
 
 
 class GitHubIntegrationError(RuntimeError):
@@ -206,6 +296,28 @@ def commit_and_push_companion_branch(
   return True
 
 
+def checkout_pr_head(workspace_dir: str, pr_number: int) -> None:
+  """Fetches and checks out `refs/pull/<pr_number>/head` in `workspace_dir`.
+
+  On `issue_comment` webhook events (e.g. `/autocloud review`), GitHub Actions
+  checks out the repository's default branch (`main`) rather than the PR's head
+  commit. Fetching `pull/<pr_number>/head` ensures files added or modified in
+  the PR exist on disk before reading workspace files.
+
+  Args:
+    workspace_dir: Local git repository root.
+    pr_number: Pull Request number.
+
+  Raises:
+    ValueError: If `pr_number` is not positive.
+    GitHubIntegrationError: If `git fetch` or `git checkout` fails.
+  """
+  if pr_number <= 0:
+    raise ValueError(f'pr_number must be positive, got {pr_number}')
+  _run_git(workspace_dir, ['fetch', 'origin', f'pull/{pr_number}/head'])
+  _run_git(workspace_dir, ['checkout', '--detach', 'FETCH_HEAD'])
+
+
 class GitHubClient:
   """Minimal GitHub REST API v3 client using `GITHUB_TOKEN`."""
 
@@ -231,6 +343,9 @@ class GitHubClient:
       )
     self._token = github_token.strip()
     self._api_base_url = api_base_url.rstrip('/')
+    self._pr_diff_hunks: dict[
+        tuple[str, int], dict[str, list[tuple[int, int]]]
+    ] = {}
 
   def _headers(self) -> dict[str, str]:
     """Returns standard GitHub REST API request headers."""
@@ -278,6 +393,26 @@ class GitHubClient:
           f'GitHub API {method} {path} returned invalid JSON.'
       ) from err
 
+  def get_pr_metadata(
+      self, repo_full_name: str, pr_number: int
+  ) -> tuple[str, str]:
+    """Fetches `(title, head_ref)` for a Pull Request via GitHub's REST API."""
+    safe_repo = validate_repo_full_name(repo_full_name)
+    resp = self._request_json(
+        'GET',
+        f'/repos/{safe_repo}/pulls/{pr_number}',
+    )
+    if not isinstance(resp, dict):
+      return f'PR #{pr_number}', ''
+    title = str(resp.get('title', '') or f'PR #{pr_number}')
+    head_obj = resp.get('head')
+    head_ref = (
+        str(head_obj.get('ref', ''))
+        if isinstance(head_obj, dict)
+        else ''
+    )
+    return title, head_ref
+
   def list_pr_changed_files(
       self, repo_full_name: str, pr_number: int
   ) -> list[str]:
@@ -292,6 +427,7 @@ class GitHubClient:
       return []
 
     paths: list[str] = []
+    hunks_by_path: dict[str, list[tuple[int, int]]] = {}
     for entry in items:
       if not isinstance(entry, dict):
         continue
@@ -299,9 +435,15 @@ class GitHubClient:
         continue
       filename = str(entry.get('filename', ''))
       try:
-        paths.append(parser.sanitize_relative_repo_path(filename))
+        safe_path = parser.sanitize_relative_repo_path(filename)
       except ValueError:
         continue
+      paths.append(safe_path)
+      patch_str = str(entry.get('patch', '') or '')
+      if patch_str:
+        hunks_by_path[safe_path] = parse_patch_right_hunks(patch_str)
+
+    self._pr_diff_hunks[(safe_repo, pr_number)] = hunks_by_path
     return paths
 
   def list_issue_comments(
@@ -398,12 +540,41 @@ class GitHubClient:
         entry['start_side'] = 'RIGHT'
       serialized_comments.append(entry)
 
+    hunks_by_path = self._pr_diff_hunks.get((safe_repo, pr_number))
+    in_diff_comments: list[dict[str, Any]] = []
+    out_of_diff_comments: list[dict[str, Any]] = []
+    if hunks_by_path is not None:
+      for entry in serialized_comments:
+        file_hunks = hunks_by_path.get(entry['path'], [])
+        aligned = _align_comment_to_hunks(entry, file_hunks)
+        if aligned is not None:
+          in_diff_comments.append(aligned)
+        else:
+          out_of_diff_comments.append(entry)
+    else:
+      in_diff_comments = serialized_comments
+
+    review_body = body
+    if out_of_diff_comments:
+      extra_sections = [
+          review_body,
+          '---\n\n### Additional Findings (Outside PR Diff Hunks)',
+      ]
+      for cmt in out_of_diff_comments:
+        loc = (
+            f"{cmt['path']}:L{cmt['start_line']}-L{cmt['line']}"
+            if 'start_line' in cmt
+            else f"{cmt['path']}:L{cmt['line']}"
+        )
+        extra_sections.append(f"#### `{loc}`\n{cmt['body']}")
+      review_body = '\n\n'.join(extra_sections)
+
     review_payload: dict[str, Any] = {
         'event': 'COMMENT',
-        'body': body,
+        'body': review_body,
     }
-    if serialized_comments:
-      review_payload['comments'] = serialized_comments
+    if in_diff_comments:
+      review_payload['comments'] = in_diff_comments
 
     try:
       resp = self._request_json(
@@ -415,13 +586,13 @@ class GitHubClient:
         return str(resp.get('html_url', ''))
       return ''
     except GitHubIntegrationError as err:
-      if not serialized_comments:
+      if not in_diff_comments:
         raise
       logging.warning(
           'Inline PR review returned %s; falling back to PR comment.', err
       )
-      fallback_sections = [body]
-      for cmt in serialized_comments:
+      fallback_sections = [review_body]
+      for cmt in in_diff_comments:
         loc = (
             f"{cmt['path']}:L{cmt['start_line']}-L{cmt['line']}"
             if 'start_line' in cmt

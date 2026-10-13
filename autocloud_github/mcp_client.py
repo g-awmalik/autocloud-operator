@@ -64,8 +64,13 @@ def build_pr_review_prompt(
   """
   file_sections: list[str] = []
   for rel_path, file_content in changed_files.items():
+    lines = file_content.splitlines()
+    numbered = '\n'.join(
+        f'{idx}: {line}' for idx, line in enumerate(lines, start=1)
+    )
     file_sections.append(
-        f'### Existing File: `{rel_path}`\n```\n{file_content}\n```'
+        f'### Existing File: `{rel_path}` ({len(lines)} lines)\n'
+        f'```\n{numbered}\n```'
     )
   bundled_files_str = '\n\n'.join(file_sections)
 
@@ -77,7 +82,9 @@ def build_pr_review_prompt(
         'diff, where each item has `{"path": "<relative_path>", "line": '
         '<1_based_end_line>, "start_line": <optional_1_based_start_line>, '
         '"body": "<explanation>", "suggestion": "<optional_replacement_code>"}`'
-        '.\n'
+        '. Each input file line below is prefixed with `<line_number>: ` for '
+        'exact 1-based line referencing—do NOT include `<line_number>: ` '
+        'prefixes inside your remediated file blocks or `suggestion` code.\n'
     )
 
   return (

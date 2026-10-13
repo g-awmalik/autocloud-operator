@@ -36,10 +36,13 @@ _FENCED_FILE_BLOCK_RE = re.compile(
 # Matches a fenced JSON block containing structured inline PR review comments:
 #   ```json title="autocloud-inline-comments"
 _INLINE_COMMENTS_BLOCK_RE = re.compile(
+    r'(?:^|\n)(?:#{1,4}\s*Line-Anchored[^\n]*\n+\s*)?'
     r'```(?:json)?\s+(?:title|file|path)=["\']?autocloud-inline-comments["\']?'
     r'\s*\n(.*?)```',
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
+
+_LINE_NUMBER_PREFIX_RE = re.compile(r'^\s*\d+:\s?(.*)$')
 
 # Fallback: ### File: `path/to/file.tf` immediately followed by a fenced block.
 _HEADING_FILE_BLOCK_RE = re.compile(
@@ -290,6 +293,25 @@ def sanitize_relative_repo_path(raw_path: str) -> str:
   return normalized
 
 
+def _strip_line_number_prefixes(code_text: str) -> str:
+  """Strips accidental `1: ` line-number prefixes from LLM code blocks."""
+  lines = code_text.splitlines()
+  non_empty = [line for line in lines if line.strip()]
+  if not non_empty:
+    return code_text
+  prefixed_count = sum(
+      1 for line in non_empty if _LINE_NUMBER_PREFIX_RE.match(line)
+  )
+  if prefixed_count * 2 <= len(non_empty):
+    return code_text
+  stripped_lines: list[str] = []
+  for line in lines:
+    match = _LINE_NUMBER_PREFIX_RE.match(line)
+    stripped_lines.append(match.group(1) if match else line)
+  trailing_nl = '\n' if code_text.endswith('\n') else ''
+  return '\n'.join(stripped_lines) + trailing_nl
+
+
 def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
   """Extracts remediated file blocks from the AutoCloud Operator's response.
 
@@ -309,7 +331,7 @@ def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
     raw_path = (match.group(1) or match.group(2) or '').strip()
     if raw_path == 'autocloud-inline-comments':
       continue
-    code_body = match.group(3)
+    code_body = _strip_line_number_prefixes(match.group(3))
     try:
       safe_path = sanitize_relative_repo_path(raw_path)
     except ValueError:
@@ -318,7 +340,7 @@ def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
 
   for match in _HEADING_FILE_BLOCK_RE.finditer(markdown_text):
     raw_path = match.group(1) or ''
-    code_body = match.group(2)
+    code_body = _strip_line_number_prefixes(match.group(2))
     try:
       safe_path = sanitize_relative_repo_path(raw_path)
     except ValueError:
@@ -383,7 +405,7 @@ def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
       body = str(item.get('body') or item.get('comment') or '').strip()
       suggestion = item.get('suggestion')
       if isinstance(suggestion, str) and '```suggestion' not in body:
-        clean_sugg = suggestion.rstrip('\n')
+        clean_sugg = _strip_line_number_prefixes(suggestion).rstrip('\n')
         body = (
             f'{body}\n\n```suggestion\n{clean_sugg}\n```'
             if body
@@ -401,6 +423,54 @@ def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
           )
       )
   return comments
+
+
+def clamp_inline_comments_to_files(
+    inline_comments: Sequence[InlineReviewComment],
+    changed_files: Mapping[str, str],
+) -> list[InlineReviewComment]:
+  """Clamps inline comment line numbers to the actual line count of each file.
+
+  If an LLM slightly miscounts lines near the end of a file (e.g. emitting
+  `start_line=21, line=25` for a 23-line file), this shifts and clamps the
+  line range into `[1, max_line]` so GitHub's Pull Request Review API does not
+  reject the entire review batch with HTTP 422.
+
+  Args:
+    inline_comments: Candidate `InlineReviewComment` items.
+    changed_files: Mapping of relative file paths to file content strings.
+
+  Returns:
+    List of `InlineReviewComment` items with line numbers clamped to file bounds.
+  """
+  clamped: list[InlineReviewComment] = []
+  for item in inline_comments:
+    file_text = changed_files.get(item.path)
+    if file_text is None:
+      clamped.append(item)
+      continue
+    max_line = len(file_text.splitlines())
+    if max_line < 1:
+      continue
+    if item.line > max_line:
+      overshoot = item.line - max_line
+      new_line = max_line
+      new_start_line: int | None = None
+      if item.start_line is not None:
+        shifted_start = max(1, item.start_line - overshoot)
+        if shifted_start < new_line:
+          new_start_line = shifted_start
+      clamped.append(
+          InlineReviewComment(
+              path=item.path,
+              line=new_line,
+              body=item.body,
+              start_line=new_start_line,
+          )
+      )
+    else:
+      clamped.append(item)
+  return clamped
 
 
 def build_inline_comments_from_remediated_files(

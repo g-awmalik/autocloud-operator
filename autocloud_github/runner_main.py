@@ -178,6 +178,22 @@ def run_action(
   if override_changed_files:
     rel_paths = list(override_changed_files)
   elif github_client is not None:
+    if event_name == 'issue_comment' and not pr_head_branch:
+      api_title, pr_head_branch = github_client.get_pr_metadata(
+          repo_full_name, pr_number
+      )
+      if api_title:
+        pr_title = api_title
+      if not dry_run_github:
+        try:
+          github_pr.checkout_pr_head(workspace_dir, pr_number)
+        except github_pr.GitHubIntegrationError as err:
+          logging.warning(
+              'Could not checkout PR #%d head ref (%s); continuing on '
+              'current workspace HEAD.',
+              pr_number,
+              err,
+          )
     rel_paths = github_client.list_pr_changed_files(repo_full_name, pr_number)
     prior_comments = github_client.list_issue_comments(
         repo_full_name, pr_number
@@ -228,7 +244,9 @@ def run_action(
   diff_inline = parser.build_inline_comments_from_remediated_files(
       changed_files, unmatched_remediated
   )
-  all_inline = [*explicit_inline, *diff_inline]
+  all_inline = parser.clamp_inline_comments_to_files(
+      [*explicit_inline, *diff_inline], changed_files
+  )
 
   logging.info(
       'Received AutoCloud review (context_id=%s, pr_mode=%s, '
