@@ -7,8 +7,8 @@ import uuid
 from absl import logging
 import requests
 
-from autocloud_github import auth
-from autocloud_github import parser
+from iac_design_review import auth
+from iac_design_review import parser
 
 DEFAULT_PROD_MCP_URL = 'https://geminicloudassist.googleapis.com/mcp'
 DEFAULT_STAGING_MCP_URL = (
@@ -52,7 +52,7 @@ def build_pr_review_prompt(
   emit inline review comments and/or complete remediated files.
 
   Args:
-    project_id: Target GCP project ID (e.g., `g4g-operate-demo`).
+    project_id: Target GCP project ID (e.g., `my-gcp-project`).
     repo_full_name: GitHub `owner/repo` identifier.
     pr_number: Pull Request number.
     pr_title: Pull Request title.

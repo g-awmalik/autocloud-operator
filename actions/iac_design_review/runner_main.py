@@ -9,11 +9,11 @@ from absl import app
 from absl import flags
 from absl import logging
 
-from autocloud_github import auth
-from autocloud_github import config
-from autocloud_github import github_pr
-from autocloud_github import mcp_client
-from autocloud_github import parser
+from iac_design_review import auth
+from iac_design_review import config
+from iac_design_review import github_pr
+from iac_design_review import mcp_client
+from iac_design_review import parser
 
 _WORKSPACE_DIR = flags.DEFINE_string(
     'workspace_dir',

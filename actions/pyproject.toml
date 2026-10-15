@@ -15,5 +15,9 @@ dependencies = [
 ]
 
 [project.scripts]
-autocloud-github-init = "autocloud_github.cli_init:run"
-autocloud-github-runner = "autocloud_github.runner_main:run"
+autocloud-github-init = "iac_design_review.cli_init:run"
+autocloud-github-runner = "iac_design_review.runner_main:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["iac_design_review*"]

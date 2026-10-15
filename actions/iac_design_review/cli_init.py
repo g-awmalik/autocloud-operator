@@ -22,8 +22,10 @@ from absl import app
 from absl import flags
 from absl import logging
 
-from autocloud_github import auth
-from autocloud_github import config
+from iac_design_review import auth
+from iac_design_review import config
+
+DEFAULT_ACTION_REF = 'GoogleCloudPlatform/gemini-cloud-assist-mcp/actions@main'
 
 _GITHUB_REPO = flags.DEFINE_string(
     'github_repo',
@@ -38,7 +40,7 @@ _REPO_DIR = flags.DEFINE_string(
 _PROJECT_ID = flags.DEFINE_string(
     'project_id',
     '',
-    'Target Google Cloud project ID (e.g. g4g-operate-demo).',
+    'Target Google Cloud project ID (e.g. my-gcp-project).',
 )
 _AGENT_ID = flags.DEFINE_string(
     'agent_id',
@@ -47,7 +49,7 @@ _AGENT_ID = flags.DEFINE_string(
 )
 _ACTION_REF = flags.DEFINE_string(
     'action_ref',
-    'google-cloud/autocloud-operator-action@v1',
+    DEFAULT_ACTION_REF,
     'GitHub Action reference used in .github/workflows/autocloud.yml.',
 )
 _ADC_PATH = flags.DEFINE_string(
@@ -154,7 +156,7 @@ def render_autocloud_config_yaml(
 
 
 def render_github_workflow_yaml(
-    *, action_ref: str = 'google-cloud/autocloud-operator-action@v1'
+    *, action_ref: str = DEFAULT_ACTION_REF
 ) -> str:
   """Renders `.github/workflows/autocloud.yml` content."""
   return (
@@ -199,7 +201,7 @@ def initialize_repository(
     repo_dir: str,
     project_id: str,
     agent_id: str = '',
-    action_ref: str = 'google-cloud/autocloud-operator-action@v1',
+    action_ref: str = DEFAULT_ACTION_REF,
     enable_code_changes: bool = True,
     pr_mode: str = 'inline_comments',
 ) -> tuple[str, str]:
@@ -451,7 +453,7 @@ def onboard_remote_repository(
     github_repo: str,
     project_id: str,
     agent_id: str = '',
-    action_ref: str = 'google-cloud/autocloud-operator-action@v1',
+    action_ref: str = DEFAULT_ACTION_REF,
     adc_path: str = _ADC_PATH.default,
     enable_code_changes: bool = True,
     pr_mode: str = 'inline_comments',
@@ -521,7 +523,7 @@ def run_interactive_wizard(
     default_github_repo: str = '',
     default_project_id: str = '',
     default_agent_id: str = '',
-    default_action_ref: str = 'google-cloud/autocloud-operator-action@v1',
+    default_action_ref: str = DEFAULT_ACTION_REF,
 ) -> tuple[str, str, str, str, bool]:
   """Prompts the user interactively for onboarding parameters.
 
@@ -547,7 +549,7 @@ def run_interactive_wizard(
   proj_prompt = (
       f'2. Google Cloud Project ID [{default_project_id}]: '
       if default_project_id
-      else '2. Google Cloud Project ID (e.g. g4g-operate-demo): '
+      else '2. Google Cloud Project ID (e.g. my-gcp-project): '
   )
   project_id = input_fn(proj_prompt).strip() or default_project_id
 

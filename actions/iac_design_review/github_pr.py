@@ -9,8 +9,8 @@ from typing import Any
 from absl import logging
 import requests
 
-from autocloud_github import config
-from autocloud_github import parser
+from iac_design_review import config
+from iac_design_review import parser
 
 DEFAULT_GITHUB_API_URL = 'https://api.github.com'
 _GITHUB_TIMEOUT_SECONDS = 30
