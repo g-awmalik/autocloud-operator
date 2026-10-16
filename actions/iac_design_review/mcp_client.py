@@ -103,6 +103,56 @@ def build_pr_review_prompt(
   )
 
 
+def _consume_mcp_response_text(response: requests.Response) -> str:
+  """Reads SSE or JSON lines from `response`, logging progress notifications.
+
+  Stops reading as soon as a terminal JSON-RPC response (`result` or `error`)
+  arrives on an SSE stream so the client never hangs waiting for socket EOF.
+
+  Args:
+    response: Open HTTP 200 `requests.Response` from the MCP endpoint.
+
+  Returns:
+    Raw response body (or accumulated SSE lines) containing the final JSON-RPC
+    response.
+  """
+  collected_lines: list[str] = []
+  for raw_line in response.iter_lines(decode_unicode=True):
+    if raw_line is None:
+      continue
+    line = (
+        raw_line.decode('utf-8', errors='replace')
+        if isinstance(raw_line, bytes)
+        else str(raw_line)
+    )
+    collected_lines.append(line)
+    stripped = line.strip()
+    if not stripped.startswith('data:'):
+      continue
+    chunk = stripped[len('data:') :].strip()
+    if not chunk or chunk == '[DONE]':
+      continue
+    try:
+      obj = json.loads(chunk)
+    except json.JSONDecodeError:
+      continue
+    if not isinstance(obj, Mapping):
+      continue
+    if obj.get('method') == 'notifications/progress':
+      params = obj.get('params')
+      if isinstance(params, Mapping):
+        msg = str(params.get('message', '')).strip()
+        if msg:
+          logging.info('[AutoCloud Progress] %s', msg)
+      continue
+    if 'result' in obj or 'error' in obj:
+      break
+
+  if collected_lines:
+    return '\n'.join(collected_lines)
+  return response.text or ''
+
+
 def ask_cloud_operator(
     *,
     tokens: auth.TokenSource,
@@ -153,6 +203,9 @@ def ask_cloud_operator(
       'params': {
           'name': 'ask_cloud_operator',
           'arguments': arguments,
+          '_meta': {
+              'progressToken': req_id,
+          },
       },
   }
 
@@ -176,6 +229,7 @@ def ask_cloud_operator(
         mcp_url,
         json=rpc_body,
         headers=headers,
+        stream=True,
         timeout=(_CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_SECONDS),
     )
   except requests.RequestException as err:
@@ -183,13 +237,22 @@ def ask_cloud_operator(
         'Could not reach the AutoCloud MCP endpoint.'
     ) from err
 
-  if response.status_code != 200:
-    raise McpTransportError(
-        f'AutoCloud MCP endpoint returned HTTP {response.status_code}.',
-        status_code=response.status_code,
-    )
+  try:
+    if response.status_code != 200:
+      raise McpTransportError(
+          f'AutoCloud MCP endpoint returned HTTP {response.status_code}.',
+          status_code=response.status_code,
+      )
 
-  json_text = parser.parse_sse(response.text)
+    raw_body = _consume_mcp_response_text(response)
+  except requests.RequestException as err:
+    raise McpTransportError(
+        'Connection to AutoCloud MCP endpoint timed out or reset mid-stream.'
+    ) from err
+  finally:
+    response.close()
+
+  json_text = parser.parse_sse(raw_body)
   try:
     payload = json.loads(json_text)
   except json.JSONDecodeError as err:

@@ -119,6 +119,14 @@ def parse_sse(raw_body: str) -> str:
 
   for chunk in reversed(chunks):
     try:
+      parsed = json.loads(chunk)
+    except json.JSONDecodeError:
+      continue
+    if isinstance(parsed, Mapping) and ('result' in parsed or 'error' in parsed):
+      return chunk
+
+  for chunk in reversed(chunks):
+    try:
       json.loads(chunk)
       return chunk
     except json.JSONDecodeError:
