@@ -1,11 +1,11 @@
-"""Human Google EUC token sources for AutoCloud MCP calls.
+"""Human Google EUC token sources for Cloud Operator MCP calls.
 
-The AutoCloud Operator agent requires human Google end-user credentials (EUC)
+The Cloud Operator agent requires human Google end-user credentials (EUC)
 and rejects service accounts or federated workload tokens. In GitHub Actions,
-an offline OAuth 2.0 refresh token (`AUTOCLOUD_OAUTH_CONFIG`) minted during
-onboarding (`autocloud-github-init`) is exchanged in-memory against Google's
-OAuth 2.0 token endpoint (`https://oauth2.googleapis.com/token`) to obtain
-short-lived (~1h) human access tokens.
+an offline OAuth 2.0 refresh token (`CLOUD_OPERATOR_OAUTH_CONFIG`) minted during
+onboarding (`cloud-operator-github-init`) is exchanged in-memory against
+Google's OAuth 2.0 token endpoint (`https://oauth2.googleapis.com/token`) to
+obtain short-lived (~1h) human access tokens.
 
 Security invariants:
   * Secrets and tokens are never logged, persisted to disk, or echoed in errors.
@@ -90,7 +90,7 @@ class OAuthRefreshTokenSource:
 
     Args:
       raw_json: JSON string containing `client_id`, `client_secret`, and
-        `refresh_token` (e.g., from `AUTOCLOUD_OAUTH_CONFIG`).
+        `refresh_token` (e.g., from `CLOUD_OPERATOR_OAUTH_CONFIG`).
 
     Returns:
       Configured `OAuthRefreshTokenSource` instance.
@@ -108,10 +108,22 @@ class OAuthRefreshTokenSource:
       ) from err
     if not isinstance(parsed, dict):
       raise TokenSourceError('OAuth configuration JSON must be an object.')
+    raw_client_id = parsed.get('client_id')
+    raw_client_secret = parsed.get('client_secret')
+    raw_refresh_token = parsed.get('refresh_token')
+    if not (
+        isinstance(raw_client_id, str)
+        and isinstance(raw_client_secret, str)
+        and isinstance(raw_refresh_token, str)
+    ):
+      raise TokenSourceError(
+          'OAuth configuration client_id, client_secret, and refresh_token '
+          'must be strings.'
+      )
     return cls(
-        client_id=str(parsed.get('client_id', '')).strip(),
-        client_secret=str(parsed.get('client_secret', '')).strip(),
-        refresh_token=str(parsed.get('refresh_token', '')).strip(),
+        client_id=raw_client_id.strip(),
+        client_secret=raw_client_secret.strip(),
+        refresh_token=raw_refresh_token.strip(),
     )
 
   @classmethod
@@ -185,12 +197,29 @@ class OAuthRefreshTokenSource:
             'Google OAuth token endpoint returned non-JSON body.'
         ) from err
 
-      access_token = str(token_data.get('access_token', '')).strip()
-      if not access_token:
+      if not isinstance(token_data, dict):
+        raise TokenSourceError(
+            'Google OAuth token endpoint returned non-object JSON.'
+        )
+
+      raw_access_token = token_data.get('access_token')
+      if not isinstance(raw_access_token, str) or not raw_access_token.strip():
         raise TokenSourceError(
             'Google OAuth token refresh returned an empty access_token.'
         )
-      expires_in = int(token_data.get('expires_in', 3600))
+      access_token = raw_access_token.strip()
+
+      raw_expires = token_data.get('expires_in', 3600)
+      if isinstance(raw_expires, bool):
+        raise TokenSourceError(
+            'Google OAuth token refresh returned invalid expires_in.'
+        )
+      try:
+        expires_in = int(raw_expires if raw_expires is not None else 3600)
+      except (TypeError, ValueError) as err:
+        raise TokenSourceError(
+            'Google OAuth token refresh returned non-numeric expires_in.'
+        ) from err
       self._cached_token = access_token
       self._expiry_epoch = now + expires_in
       logging.info(
@@ -208,7 +237,8 @@ def build_token_source(
   """Builds the appropriate `TokenSource` for the execution environment.
 
   Args:
-    oauth_config_json: Raw JSON string from `AUTOCLOUD_OAUTH_CONFIG` secret.
+    oauth_config_json: Raw JSON string from `CLOUD_OPERATOR_OAUTH_CONFIG`
+      secret.
     use_local_adc: Whether to read local workstation ADC credentials instead.
     adc_path: Path to local ADC file when `use_local_adc` is True.
 
@@ -229,5 +259,5 @@ def build_token_source(
     return OAuthRefreshTokenSource.from_json_string(oauth_config_json)
 
   raise TokenSourceError(
-      'Missing AUTOCLOUD_OAUTH_CONFIG secret and --use_local_adc is False.'
+      'Missing CLOUD_OPERATOR_OAUTH_CONFIG secret and --use_local_adc is False.'
   )

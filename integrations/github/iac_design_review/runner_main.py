@@ -23,7 +23,7 @@ _WORKSPACE_DIR = flags.DEFINE_string(
 _CONFIG_PATH = flags.DEFINE_string(
     'config_path',
     '',
-    'Path to .github/autocloud.yml relative to workspace or absolute.',
+    'Path to .github/cloud-operator.yml relative to workspace or absolute.',
 )
 _EVENT_NAME = flags.DEFINE_string(
     'event_name',
@@ -184,6 +184,17 @@ def run_action(
       )
       if api_title:
         pr_title = api_title
+      if (
+          not dry_run_github
+          and not repo_cfg.scenarios.code_changes.allow_fork_prs
+          and github_client.is_pr_from_fork(repo_full_name, pr_number) is True
+      ):
+        logging.info(
+            'PR #%d originates from a fork and allow_fork_prs is False; '
+            'skipping.',
+            pr_number,
+        )
+        return 0
       if not dry_run_github:
         try:
           github_pr.checkout_pr_head(workspace_dir, pr_number)
@@ -307,7 +318,7 @@ def run_action(
   comment_body = clean_summary
   if companion_url:
     comment_body = (
-        f'### AutoCloud Companion PR Opened: {companion_url}\n\n'
+        f'### Cloud Operator Companion PR Opened: {companion_url}\n\n'
         f'{comment_body}'
     )
   comment_with_ctx = parser.embed_context_id_marker(
@@ -320,7 +331,7 @@ def run_action(
 
 
 def main(argv: Sequence[str]) -> None:
-  """CLI entrypoint for the AutoCloud GitHub Action runner."""
+  """CLI entrypoint for the Cloud Operator GitHub Action runner."""
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
@@ -330,7 +341,7 @@ def main(argv: Sequence[str]) -> None:
       or os.getcwd()
   )
   config_path = _CONFIG_PATH.value or os.path.join(
-      workspace_dir, '.github', 'autocloud.yml'
+      workspace_dir, '.github', 'cloud-operator.yml'
   )
   event_name = _EVENT_NAME.value or os.environ.get(
       'GITHUB_EVENT_NAME', 'pull_request'
@@ -341,12 +352,12 @@ def main(argv: Sequence[str]) -> None:
   )
   mcp_url = (
       _MCP_URL.value
-      or os.environ.get('AUTOCLOUD_MCP_URL', '')
+      or os.environ.get('CLOUD_OPERATOR_MCP_URL', '')
       or mcp_client.DEFAULT_PROD_MCP_URL
   )
 
   tokens = auth.build_token_source(
-      oauth_config_json=os.environ.get('AUTOCLOUD_OAUTH_CONFIG', ''),
+      oauth_config_json=os.environ.get('CLOUD_OPERATOR_OAUTH_CONFIG', ''),
       use_local_adc=_USE_LOCAL_ADC.value,
   )
 

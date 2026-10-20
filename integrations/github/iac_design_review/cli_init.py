@@ -1,12 +1,12 @@
-"""Onboarding CLI wizard (`autocloud-github-init`) for Option A 1-command setup.
+"""Onboarding CLI wizard (`cloud-operator-github-init`) for Option A setup.
 
 Supports both:
   1. Zero-clone remote GitHub onboarding (`--github_repo=owner/repo` or
      interactive terminal wizard): verifies/obtains Google OAuth refresh
      credentials, enables GitHub Actions PR creation permissions via API,
-     uploads `AUTOCLOUD_OAUTH_CONFIG` to GitHub Secrets, and commits
-     `.github/autocloud.yml` + `.github/workflows/autocloud.yml` directly to
-     the remote repository.
+     uploads `CLOUD_OPERATOR_OAUTH_CONFIG` to GitHub Secrets, and commits
+     `.github/cloud-operator.yml` + `.github/workflows/cloud-operator.yml`
+     directly to the remote repository.
   2. Local checkout file generation (`--repo_dir=/path/to/repo`).
 """
 
@@ -25,7 +25,10 @@ from absl import logging
 from iac_design_review import auth
 from iac_design_review import config
 
-DEFAULT_ACTION_REF = 'GoogleCloudPlatform/gemini-cloud-assist-mcp/actions@main'
+DEFAULT_ACTION_REF = (
+    'GoogleCloudPlatform/gemini-cloud-assist-mcp/'
+    'integrations/github/actions/iac-review@main'
+)
 
 _GITHUB_REPO = flags.DEFINE_string(
     'github_repo',
@@ -45,12 +48,12 @@ _PROJECT_ID = flags.DEFINE_string(
 _AGENT_ID = flags.DEFINE_string(
     'agent_id',
     '',
-    'Optional custom AutoCloud Operator agent ID (defaults to personal agent).',
+    'Optional custom Cloud Operator agent ID (defaults to personal agent).',
 )
 _ACTION_REF = flags.DEFINE_string(
     'action_ref',
     DEFAULT_ACTION_REF,
-    'GitHub Action reference used in .github/workflows/autocloud.yml.',
+    'GitHub Action reference used in .github/workflows/cloud-operator.yml.',
 )
 _ADC_PATH = flags.DEFINE_string(
     'adc_path',
@@ -62,7 +65,7 @@ _ADC_PATH = flags.DEFINE_string(
 _SET_GITHUB_SECRET = flags.DEFINE_bool(
     'set_github_secret',
     False,
-    'If True, uploads AUTOCLOUD_OAUTH_CONFIG to GitHub via `gh secret set`.',
+    'If True, uploads CLOUD_OPERATOR_OAUTH_CONFIG to GitHub via `gh secret set`.',
 )
 _INTERACTIVE = flags.DEFINE_bool(
     'interactive',
@@ -135,10 +138,15 @@ def render_autocloud_config_yaml(
       '      - pull_request.opened\n'
       '      - pull_request.synchronize\n'
       '      - issue_comment.created\n'
-      '    trigger_command: "/autocloud review"\n'
+      '    trigger_command: "/cloud-operator review"\n'
       '    # Options: "inline_comments" (default), "companion_pr", '
       '"comment_only"\n'
-      f'    pr_mode: "{pr_mode}"\n\n'
+      f'    pr_mode: "{pr_mode}"\n'
+      '    allowed_author_associations:\n'
+      '      - OWNER\n'
+      '      - MEMBER\n'
+      '      - COLLABORATOR\n'
+      '    allow_fork_prs: false\n\n'
       '  # Scenario 2: Issue & Bug Implementation '
       '(WORK IN PROGRESS - Not available yet)\n'
       '  issue_implementation:\n'
@@ -147,8 +155,8 @@ def render_autocloud_config_yaml(
       '      - issues.labeled\n'
       '      - issue_comment.created\n'
       '    trigger_labels:\n'
-      '      - "autocloud-implement"\n'
-      '    trigger_command: "/autocloud implement"\n'
+      '      - "cloud-operator-implement"\n'
+      '    trigger_command: "/cloud-operator implement"\n'
       '    base_branch: "main"\n'
   )
   config.parse_config_yaml(yaml_str)
@@ -158,9 +166,9 @@ def render_autocloud_config_yaml(
 def render_github_workflow_yaml(
     *, action_ref: str = DEFAULT_ACTION_REF
 ) -> str:
-  """Renders `.github/workflows/autocloud.yml` content."""
+  """Renders `.github/workflows/cloud-operator.yml` content."""
   return (
-      'name: AutoCloud Operator\n\n'
+      'name: Cloud Operator\n\n'
       'on:\n'
       '  pull_request:\n'
       '    types: [opened, synchronize, reopened]\n'
@@ -168,7 +176,7 @@ def render_github_workflow_yaml(
       '    types: [created]\n\n'
       'concurrency:\n'
       '  group: >-\n'
-      '    autocloud-${{ github.event.pull_request.number ||\n'
+      '    cloud-operator-${{ github.event.pull_request.number ||\n'
       '    github.event.issue.number || github.ref }}\n'
       '  cancel-in-progress: true\n\n'
       'permissions:\n'
@@ -176,23 +184,23 @@ def render_github_workflow_yaml(
       '  pull-requests: write\n'
       '  issues: write\n\n'
       'jobs:\n'
-      '  autocloud:\n'
+      '  cloud-operator:\n'
       '    runs-on: ubuntu-latest\n'
       '    if: >-\n'
       "      github.event_name == 'pull_request' ||\n"
       "      (github.event_name == 'issue_comment' &&\n"
-      "      contains(github.event.comment.body, '/autocloud'))\n"
+      "      contains(github.event.comment.body, '/cloud-operator'))\n"
       '    steps:\n'
       '      - name: Checkout Repository\n'
       '        uses: actions/checkout@v4\n'
       '        with:\n'
       '          fetch-depth: 0\n\n'
-      '      - name: Run AutoCloud Operator\n'
+      '      - name: Run Cloud Operator\n'
       f'        uses: {action_ref}\n'
       '        env:\n'
       '          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n'
-      '          AUTOCLOUD_OAUTH_CONFIG: '
-      '${{ secrets.AUTOCLOUD_OAUTH_CONFIG }}\n'
+      '          CLOUD_OPERATOR_OAUTH_CONFIG: '
+      '${{ secrets.CLOUD_OPERATOR_OAUTH_CONFIG }}\n'
   )
 
 
@@ -205,12 +213,12 @@ def initialize_repository(
     enable_code_changes: bool = True,
     pr_mode: str = 'inline_comments',
 ) -> tuple[str, str]:
-  """Writes `.github/autocloud.yml` and `.github/workflows/autocloud.yml`.
+  """Writes `.github/cloud-operator.yml` and `.github/workflows/cloud-operator.yml`.
 
   Args:
     repo_dir: Target GitHub repository root directory.
     project_id: Target GCP project ID.
-    agent_id: Optional target AutoCloud Operator agent ID.
+    agent_id: Optional target Cloud Operator agent ID.
     action_ref: GitHub Action reference string.
     enable_code_changes: Whether Scenario 1 (PR Code & IaC Review) is enabled.
     pr_mode: PR review mode (`inline_comments`, `companion_pr`, `comment_only`).
@@ -234,8 +242,8 @@ def initialize_repository(
   workflows_dir = os.path.join(github_dir, 'workflows')
   os.makedirs(workflows_dir, exist_ok=True)
 
-  config_path = os.path.join(github_dir, 'autocloud.yml')
-  workflow_path = os.path.join(workflows_dir, 'autocloud.yml')
+  config_path = os.path.join(github_dir, 'cloud-operator.yml')
+  workflow_path = os.path.join(workflows_dir, 'cloud-operator.yml')
 
   with open(config_path, 'w', encoding='utf-8') as cfg_file:
     cfg_file.write(config_yaml)
@@ -303,7 +311,7 @@ def upload_oauth_secret_via_gh(
     github_repo: str = '',
     auto_gcloud_login: bool = True,
 ) -> None:
-  """Validates local ADC user credentials and sets `AUTOCLOUD_OAUTH_CONFIG`.
+  """Validates local ADC user credentials and sets `CLOUD_OPERATOR_OAUTH_CONFIG`.
 
   Args:
     adc_path: Path to local `application_default_credentials.json`.
@@ -318,7 +326,7 @@ def upload_oauth_secret_via_gh(
   secret_payload = ensure_adc_credentials(
       adc_path=adc_path, auto_gcloud_login=auto_gcloud_login
   )
-  cmd = ['gh', 'secret', 'set', 'AUTOCLOUD_OAUTH_CONFIG']
+  cmd = ['gh', 'secret', 'set', 'CLOUD_OPERATOR_OAUTH_CONFIG']
   if github_repo:
     safe_repo = _validate_github_repo(github_repo)
     cmd.extend(['--repo', safe_repo])
@@ -336,7 +344,8 @@ def upload_oauth_secret_via_gh(
     )
   except subprocess.CalledProcessError as err:
     raise RuntimeError(
-        f'gh secret set AUTOCLOUD_OAUTH_CONFIG failed (exit {err.returncode}).'
+        'gh secret set CLOUD_OPERATOR_OAUTH_CONFIG failed '
+        f'(exit {err.returncode}).'
     ) from err
 
 
@@ -486,7 +495,9 @@ def onboard_remote_repository(
   )
   workflow_yaml = render_github_workflow_yaml(action_ref=action_ref)
 
-  logging.info('1/4 Uploading AUTOCLOUD_OAUTH_CONFIG secret to %s...', safe_repo)
+  logging.info(
+      '1/4 Uploading CLOUD_OPERATOR_OAUTH_CONFIG secret to %s...', safe_repo
+  )
   upload_oauth_secret_via_gh(
       adc_path=adc_path,
       github_repo=safe_repo,
@@ -498,22 +509,22 @@ def onboard_remote_repository(
   )
   enable_github_workflow_pr_permissions(github_repo=safe_repo)
 
-  logging.info('3/4 Committing .github/autocloud.yml to %s...', safe_repo)
+  logging.info('3/4 Committing .github/cloud-operator.yml to %s...', safe_repo)
   upsert_remote_github_file(
       github_repo=safe_repo,
-      file_path='.github/autocloud.yml',
+      file_path='.github/cloud-operator.yml',
       content=config_yaml,
-      commit_message='ci(autocloud): configure .github/autocloud.yml',
+      commit_message='ci(cloud-operator): configure .github/cloud-operator.yml',
   )
 
   logging.info(
-      '4/4 Committing .github/workflows/autocloud.yml to %s...', safe_repo
+      '4/4 Committing .github/workflows/cloud-operator.yml to %s...', safe_repo
   )
   upsert_remote_github_file(
       github_repo=safe_repo,
-      file_path='.github/workflows/autocloud.yml',
+      file_path='.github/workflows/cloud-operator.yml',
       content=workflow_yaml,
-      commit_message='ci(autocloud): add AutoCloud Operator workflow',
+      commit_message='ci(cloud-operator): add Cloud Operator workflow',
   )
 
 
@@ -642,7 +653,7 @@ def main(argv: Sequence[str]) -> None:
         auto_gcloud_login=_AUTO_GCLOUD_LOGIN.value,
     )
     logging.info(
-        'Uploaded AUTOCLOUD_OAUTH_CONFIG secret via `gh secret set`.'
+        'Uploaded CLOUD_OPERATOR_OAUTH_CONFIG secret via `gh secret set`.'
     )
 
 

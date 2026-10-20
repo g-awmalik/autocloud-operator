@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autocloud-github-action"
+name = "cloud-operator-github-action"
 version = "0.1.0"
-description = "AutoCloud Operator GitHub Action & CLI Setup Wizard (Option 1)"
+description = "Cloud Operator GitHub Action & CLI Setup Wizard"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-autocloud-github-init = "iac_design_review.cli_init:run"
-autocloud-github-runner = "iac_design_review.runner_main:run"
+cloud-operator-github-init = "iac_design_review.cli_init:run"
+cloud-operator-github-runner = "iac_design_review.runner_main:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
