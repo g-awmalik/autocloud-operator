@@ -39,6 +39,22 @@ GitHub repository to the **AutoCloud Operator** agent via MCP
        updates a Companion PR targeting the contributor's PR `head` branch.
      - **`comment_only`**: Posts a top-level summary comment on the existing PR.
 
+```mermaid
+flowchart TD
+    subgraph Setup["1. One-Time Onboarding (Repo Admin)"]
+        Admin["Repo Admin"] -->|"Runs onboarding setup"| GHSecrets[("GitHub Actions Secrets &<br/>.github/cloud-operator.yml")]
+    end
+
+    subgraph Runtime["2. Pull Request Review (Repo User)"]
+        User["Repo User (PR Creator)"] -->|"Opens PR or comments<br/>/cloud-operator review"| PR["GitHub Pull Request"]
+        PR -->|"Triggers workflow"| Action["IaC Design Review Action"]
+        GHSecrets -.->|"Provides OAuth credentials<br/>& repo config"| Action
+        Action -->|"1. Invokes Cloud Operator<br/>with modified IaC files"| Operator["Cloud Operator Agent"]
+        Operator -->|"2. Returns design review<br/>& remediated IaC"| Action
+        Action -->|"3. Parses response & publishes<br/>inline comments or Companion PR"| PR
+    end
+```
+
 ## Quickstart: One-Command Remote Repository Onboarding
 
 1. Authenticate with GitHub CLI and Google Cloud ADC:
