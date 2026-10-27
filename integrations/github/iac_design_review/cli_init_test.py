@@ -1,6 +1,8 @@
 """Unit tests for cli_init.py."""
 
+import io
 import os
+import re
 import subprocess
 import tempfile
 from unittest import mock
@@ -26,6 +28,15 @@ class CliInitTest(absltest.TestCase):
       loaded = config.load_config(cfg_path)
       self.assertEqual(loaded.project_id, 'my-gcp-project')
       self.assertEqual(loaded.agent_id, 'operator-prod')
+      self.assertTrue(loaded.scenarios.issue_implementation.enabled)
+      self.assertEqual(
+          loaded.scenarios.issue_implementation.triggers,
+          ('issues.opened', 'issues.labeled', 'issue_comment.created'),
+      )
+      with open(wf_path, encoding='utf-8') as wf_file:
+        wf_text = wf_file.read()
+      self.assertIn('issues:\n    types: [opened, labeled]', wf_text)
+      self.assertIn("github.event_name == 'issues'", wf_text)
 
     with tempfile.TemporaryDirectory() as tmp_dir_default:
       cfg_path, _ = cli_init.initialize_repository(
@@ -36,6 +47,7 @@ class CliInitTest(absltest.TestCase):
       self.assertEqual(loaded_default.agent_id, '')
 
   def test_run_interactive_wizard_collects_inputs(self):
+    prompts: list[str] = []
     answers = iter([
         'my-org/brownfield-poc',
         'my-gcp-project',
@@ -46,9 +58,16 @@ class CliInitTest(absltest.TestCase):
         ),
         'y',
     ])
-    repo, proj, agent, action_ref, enable_code = (
-        cli_init.run_interactive_wizard(input_fn=lambda _: next(answers))
-    )
+
+    def fake_input(prompt: str) -> str:
+      prompts.append(prompt)
+      return next(answers)
+
+    stdout_buf = io.StringIO()
+    with mock.patch('sys.stdout', stdout_buf):
+      repo, proj, agent, action_ref, enable_code = (
+          cli_init.run_interactive_wizard(input_fn=fake_input)
+      )
     self.assertEqual(repo, 'my-org/brownfield-poc')
     self.assertEqual(proj, 'my-gcp-project')
     self.assertEqual(agent, 'operator-prod')
@@ -60,6 +79,38 @@ class CliInitTest(absltest.TestCase):
         ),
     )
     self.assertTrue(enable_code)
+    self.assertIn(
+        '=== Cloud Operator — GitHub Onboarding Wizard ===',
+        stdout_buf.getvalue(),
+    )
+    self.assertNotIn('AutoCloud', stdout_buf.getvalue())
+    self.assertTrue(
+        any('Cloud Operator Agent ID' in p for p in prompts),
+        msg=f'Expected Cloud Operator Agent ID prompt in {prompts!r}',
+    )
+    self.assertFalse(any('AutoCloud' in p for p in prompts))
+
+  def test_readme_sample_config_yaml_parses_cleanly(self):
+    readme_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'README.md',
+    )
+    with open(readme_path, encoding='utf-8') as readme_file:
+      readme_text = readme_file.read()
+    match = re.search(r'```yaml\n(.*?)```', readme_text, re.DOTALL)
+    self.assertIsNotNone(match)
+    parsed = config.parse_config_yaml(match.group(1))
+    self.assertEqual(parsed.project_id, 'my-gcp-project-id')
+    self.assertEqual(parsed.agent_id, 'my-operator-agent')
+    self.assertEqual(
+        parsed.scenarios.code_changes.triggers,
+        (
+            'pull_request.opened',
+            'pull_request.synchronize',
+            'issue_comment.created',
+        ),
+    )
+    self.assertTrue(parsed.scenarios.issue_implementation.enabled)
 
   @mock.patch.object(cli_init, 'ensure_adc_credentials')
   @mock.patch.object(subprocess, 'run')

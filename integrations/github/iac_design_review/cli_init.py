@@ -147,17 +147,20 @@ def render_autocloud_config_yaml(
       '      - MEMBER\n'
       '      - COLLABORATOR\n'
       '    allow_fork_prs: false\n\n'
-      '  # Scenario 2: Issue & Bug Implementation '
-      '(WORK IN PROGRESS - Not available yet)\n'
+      '  # Scenario 2: Issue & Bug Implementation\n'
       '  issue_implementation:\n'
-      '    enabled: false\n'
+      '    enabled: true\n'
       '    triggers:\n'
+      '      - issues.opened\n'
       '      - issues.labeled\n'
       '      - issue_comment.created\n'
-      '    trigger_labels:\n'
-      '      - "cloud-operator-implement"\n'
+      '    trigger_labels: []\n'
       '    trigger_command: "/cloud-operator implement"\n'
       '    base_branch: "main"\n'
+      '    allowed_author_associations:\n'
+      '      - OWNER\n'
+      '      - MEMBER\n'
+      '      - COLLABORATOR\n'
   )
   config.parse_config_yaml(yaml_str)
   return yaml_str
@@ -172,6 +175,8 @@ def render_github_workflow_yaml(
       'on:\n'
       '  pull_request:\n'
       '    types: [opened, synchronize, reopened]\n'
+      '  issues:\n'
+      '    types: [opened, labeled]\n'
       '  issue_comment:\n'
       '    types: [created]\n\n'
       'concurrency:\n'
@@ -188,6 +193,7 @@ def render_github_workflow_yaml(
       '    runs-on: ubuntu-latest\n'
       '    if: >-\n'
       "      github.event_name == 'pull_request' ||\n"
+      "      github.event_name == 'issues' ||\n"
       "      (github.event_name == 'issue_comment' &&\n"
       "      contains(github.event.comment.body, '/cloud-operator'))\n"
       '    steps:\n'
@@ -549,7 +555,7 @@ def run_interactive_wizard(
     Tuple of `(github_repo, project_id, agent_id, action_ref,
     enable_code_changes)`.
   """
-  print('\n=== AutoCloud Operator — GitHub Onboarding Wizard ===\n')
+  print('\n=== Cloud Operator — GitHub Onboarding Wizard ===\n')
   repo_prompt = (
       f'1. GitHub Repository (owner/repo) [{default_github_repo}]: '
       if default_github_repo
@@ -565,9 +571,9 @@ def run_interactive_wizard(
   project_id = input_fn(proj_prompt).strip() or default_project_id
 
   agent_prompt = (
-      f'3. AutoCloud Agent ID (optional) [{default_agent_id}]: '
+      f'3. Cloud Operator Agent ID (optional) [{default_agent_id}]: '
       if default_agent_id
-      else '3. AutoCloud Agent ID (optional, Enter for personal agent): '
+      else '3. Cloud Operator Agent ID (optional, Enter for personal agent): '
   )
   agent_id = input_fn(agent_prompt).strip() or default_agent_id
 
@@ -578,7 +584,7 @@ def run_interactive_wizard(
   print('   [1] PR Code & IaC Review (Default: Enabled, Mode: Inline Comments)')
   print(
       '   [2] Issue & Bug Implementation '
-      '[Work in Progress — Not available yet]'
+      '(Default: Enabled, Opens Companion PR)'
   )
   enable_ans = (
       input_fn('   Enable PR Code & IaC Review? [Y/n]: ').strip().lower()
@@ -629,7 +635,7 @@ def main(argv: Sequence[str]) -> None:
         auto_gcloud_login=_AUTO_GCLOUD_LOGIN.value,
     )
     logging.info(
-        'Successfully onboarded https://github.com/%s with AutoCloud Operator!',
+        'Successfully onboarded https://github.com/%s with Cloud Operator!',
         github_repo,
     )
     return
@@ -643,7 +649,7 @@ def main(argv: Sequence[str]) -> None:
       enable_code_changes=enable_code_changes,
       pr_mode=pr_mode,
   )
-  logging.info('Generated AutoCloud config: %s', config_path)
+  logging.info('Generated Cloud Operator config: %s', config_path)
   logging.info('Generated GitHub workflow: %s', workflow_path)
 
   if _SET_GITHUB_SECRET.value:

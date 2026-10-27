@@ -28,6 +28,15 @@ class ConfigTest(absltest.TestCase):
     )
     self.assertFalse(parsed.scenarios.code_changes.allow_fork_prs)
     self.assertFalse(parsed.scenarios.issue_implementation.enabled)
+    self.assertEqual(
+        parsed.scenarios.issue_implementation.triggers,
+        ('issues.opened', 'issues.labeled', 'issue_comment.created'),
+    )
+    self.assertEqual(parsed.scenarios.issue_implementation.trigger_labels, ())
+    self.assertEqual(
+        parsed.scenarios.issue_implementation.allowed_author_associations,
+        ('OWNER', 'MEMBER', 'COLLABORATOR'),
+    )
 
   def test_normalize_agent_id_strips_reserved_autocloud_prefix(self):
     yaml_str = """
@@ -61,7 +70,7 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(config.ConfigValidationError):
       config.parse_config_yaml(yaml_str)
 
-  def test_rejects_empty_trigger_command(self):
+  def test_rejects_empty_trigger_command_or_base_branch(self):
     code_empty_yaml = """
     version: 1
     project_id: "my-gcp-project"
@@ -88,6 +97,19 @@ class ConfigTest(absltest.TestCase):
     ):
       config.parse_config_yaml(issue_empty_yaml)
 
+    empty_base_yaml = """
+    version: 1
+    project_id: "my-gcp-project"
+    scenarios:
+      issue_implementation:
+        base_branch: "   "
+    """
+    with self.assertRaisesRegex(
+        config.ConfigValidationError,
+        'scenarios.issue_implementation.base_branch must be a non-empty',
+    ):
+      config.parse_config_yaml(empty_base_yaml)
+
   def test_rejects_non_string_or_non_boolean_config_types(self):
     for invalid_yaml in (
         'version: true\nproject_id: "my-gcp-project"\n',
@@ -106,6 +128,10 @@ class ConfigTest(absltest.TestCase):
             'version: 1\nproject_id: "my-gcp-project"\n'
             'scenarios:\n  issue_implementation:\n    trigger_labels: [null]\n'
         ),
+        (
+            'version: 1\nproject_id: "my-gcp-project"\n'
+            'scenarios:\n  issue_implementation:\n    triggers: []\n'
+        ),
     ):
       with self.assertRaises(config.ConfigValidationError):
         config.parse_config_yaml(invalid_yaml)
@@ -122,6 +148,17 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(config.ConfigValidationError):
       config.parse_config_yaml(bad_assoc_yaml)
 
+    bad_issue_assoc_yaml = """
+    version: 1
+    project_id: "my-gcp-project"
+    scenarios:
+      issue_implementation:
+        allowed_author_associations:
+          - INVALID_ROLE
+    """
+    with self.assertRaises(config.ConfigValidationError):
+      config.parse_config_yaml(bad_issue_assoc_yaml)
+
     bad_fork_yaml = """
     version: 1
     project_id: "my-gcp-project"
@@ -132,18 +169,35 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(config.ConfigValidationError):
       config.parse_config_yaml(bad_fork_yaml)
 
-  def test_rejects_enabled_issue_implementation_as_work_in_progress(self):
+  def test_parses_enabled_issue_implementation_config(self):
     yaml_str = """
     version: 1
     project_id: "my-gcp-project"
     scenarios:
+      code_changes:
+        enabled: false
       issue_implementation:
         enabled: true
+        triggers:
+          - issues.opened
+          - issues.labeled
+          - issue_comment.created
+        trigger_labels:
+          - bug
+          - enhancement
+        trigger_command: "/cloud-operator implement"
+        base_branch: "develop"
+        allowed_author_associations:
+          - OWNER
+          - MEMBER
     """
-    with self.assertRaisesRegex(
-        config.ConfigValidationError, 'work in progress'
-    ):
-      config.parse_config_yaml(yaml_str)
+    parsed = config.parse_config_yaml(yaml_str)
+    self.assertFalse(parsed.scenarios.code_changes.enabled)
+    issue_cfg = parsed.scenarios.issue_implementation
+    self.assertTrue(issue_cfg.enabled)
+    self.assertEqual(issue_cfg.trigger_labels, ('bug', 'enhancement'))
+    self.assertEqual(issue_cfg.base_branch, 'develop')
+    self.assertEqual(issue_cfg.allowed_author_associations, ('OWNER', 'MEMBER'))
 
   def test_should_trigger_code_review_pr_events_and_fork_policy(self):
     cfg = config.parse_config_yaml(
@@ -180,19 +234,24 @@ class ConfigTest(absltest.TestCase):
         config.should_trigger_code_review(cfg, 'pull_request', draft_payload)
     )
 
-    companion_loop_payload = {
-        'action': 'opened',
-        'pull_request': {
-            'number': 43,
-            'draft': False,
-            'head': {'ref': 'cloud-operator/remediate-pr-42'},
-        },
-    }
-    self.assertFalse(
-        config.should_trigger_code_review(
-            cfg, 'pull_request', companion_loop_payload
-        )
-    )
+    for loop_branch in (
+        'cloud-operator/remediate-pr-42',
+        'cloud-operator/issue-10',
+    ):
+      companion_loop_payload = {
+          'action': 'opened',
+          'pull_request': {
+              'number': 43,
+              'draft': False,
+              'author_association': 'OWNER',
+              'head': {'ref': loop_branch},
+          },
+      }
+      self.assertFalse(
+          config.should_trigger_code_review(
+              cfg, 'pull_request', companion_loop_payload
+          )
+      )
 
     fork_payload = {
         'action': 'opened',
@@ -325,6 +384,139 @@ class ConfigTest(absltest.TestCase):
     self.assertFalse(
         config.should_trigger_code_review(
             cfg, 'issue_comment', plain_issue_comment_payload
+        )
+    )
+
+  def test_should_trigger_issue_implementation_events_labels_and_pr_exclusion(
+      self,
+  ):
+    disabled_cfg = config.parse_config_yaml(
+        'version: 1\nproject_id: "my-gcp-project"\n'
+    )
+    opened_payload = {
+        'action': 'opened',
+        'issue': {
+            'number': 7,
+            'title': 'Add Cloud Armor policy',
+            'author_association': 'OWNER',
+            'labels': [],
+        },
+    }
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            disabled_cfg, 'issues', opened_payload
+        )
+    )
+
+    enabled_no_labels_cfg = config.parse_config_yaml(
+        'version: 1\nproject_id: "my-gcp-project"\n'
+        'scenarios:\n  issue_implementation:\n    enabled: true\n'
+    )
+    self.assertTrue(
+        config.should_trigger_issue_implementation(
+            enabled_no_labels_cfg, 'issues', opened_payload
+        )
+    )
+
+    # Untrusted author is rejected.
+    untrusted_issue_payload = {
+        'action': 'opened',
+        'issue': {
+            'number': 8,
+            'author_association': 'NONE',
+        },
+    }
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            enabled_no_labels_cfg, 'issues', untrusted_issue_payload
+        )
+    )
+
+    # Label filter restricts issues.opened and issues.labeled, but NOT
+    # issue_comment.created with /cloud-operator implement.
+    labeled_cfg = config.parse_config_yaml(
+        'version: 1\nproject_id: "my-gcp-project"\n'
+        'scenarios:\n  issue_implementation:\n'
+        '    enabled: true\n'
+        '    trigger_labels: ["bug", "enhancement"]\n'
+    )
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issues', opened_payload
+        )
+    )
+    opened_with_bug_payload = {
+        'action': 'opened',
+        'issue': {
+            'number': 7,
+            'author_association': 'MEMBER',
+            'labels': [{'name': 'Bug'}],
+        },
+    }
+    self.assertTrue(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issues', opened_with_bug_payload
+        )
+    )
+    labeled_event_match = {
+        'action': 'labeled',
+        'label': {'name': 'enhancement'},
+        'issue': {
+            'number': 7,
+            'author_association': 'MEMBER',
+            'labels': [{'name': 'enhancement'}],
+        },
+    }
+    self.assertTrue(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issues', labeled_event_match
+        )
+    )
+    labeled_event_unrelated = {
+        'action': 'labeled',
+        'label': {'name': 'wontfix'},
+        'issue': {
+            'number': 7,
+            'author_association': 'MEMBER',
+            'labels': [{'name': 'enhancement'}, {'name': 'wontfix'}],
+        },
+    }
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issues', labeled_event_unrelated
+        )
+    )
+
+    # On-demand /cloud-operator implement comment works on unlabeled Issue...
+    issue_comment_payload = {
+        'action': 'created',
+        'issue': {'number': 7, 'labels': []},
+        'comment': {
+            'author_association': 'COLLABORATOR',
+            'body': '/cloud-operator implement please use us-central1',
+        },
+    }
+    self.assertTrue(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issue_comment', issue_comment_payload
+        )
+    )
+
+    # ...and NEVER triggers when posted on a Pull Request!
+    pr_comment_payload = {
+        'action': 'created',
+        'issue': {
+            'number': 42,
+            'pull_request': {'url': 'https://api.github.com/repos/o/r/pulls/42'},
+        },
+        'comment': {
+            'author_association': 'OWNER',
+            'body': '/cloud-operator implement',
+        },
+    }
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            enabled_no_labels_cfg, 'issue_comment', pr_comment_payload
         )
     )
 

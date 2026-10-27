@@ -50,6 +50,7 @@ DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS: tuple[str, ...] = (
 )
 
 COMPANION_BRANCH_PREFIX = 'cloud-operator/remediate-pr-'
+ISSUE_COMPANION_BRANCH_PREFIX = 'cloud-operator/issue-'
 
 
 class ConfigValidationError(ValueError):
@@ -58,7 +59,7 @@ class ConfigValidationError(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class CodeChangesConfig:
-  """Configuration for Scenario 1: PR Code & IaC Review (Milestone 1 MVP)."""
+  """Configuration for Scenario 1: PR Code & IaC Review."""
 
   enabled: bool = True
   triggers: tuple[str, ...] = (
@@ -76,16 +77,20 @@ class CodeChangesConfig:
 
 @dataclasses.dataclass(frozen=True)
 class IssueImplementationConfig:
-  """Configuration for Scenario 2: Issue & Bug Implementation (Milestone 2)."""
+  """Configuration for Scenario 2: Issue & Bug Implementation."""
 
   enabled: bool = False
   triggers: tuple[str, ...] = (
+      'issues.opened',
       'issues.labeled',
       'issue_comment.created',
   )
-  trigger_labels: tuple[str, ...] = ('cloud-operator-implement',)
+  trigger_labels: tuple[str, ...] = ()
   trigger_command: str = '/cloud-operator implement'
   base_branch: str = 'main'
+  allowed_author_associations: tuple[str, ...] = (
+      DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS
+  )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,6 +137,30 @@ def _require_str(
   return val.strip()
 
 
+def _parse_author_associations(
+    raw_map: Mapping[str, Any], section: str
+) -> tuple[str, ...]:
+  """Parses and validates `allowed_author_associations` for a scenario."""
+  raw_associations = raw_map.get(
+      'allowed_author_associations',
+      list(DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS),
+  )
+  if not isinstance(raw_associations, list) or not raw_associations:
+    raise ConfigValidationError(
+        f'{section}.allowed_author_associations must be a non-empty list.'
+    )
+  associations: list[str] = []
+  for item in raw_associations:
+    cleaned_assoc = str(item).strip().upper() if isinstance(item, str) else ''
+    if not cleaned_assoc or cleaned_assoc not in ALLOWED_AUTHOR_ASSOCIATIONS:
+      raise ConfigValidationError(
+          f'Unsupported author_association: {item!r}. '
+          f'Allowed: {sorted(ALLOWED_AUTHOR_ASSOCIATIONS)}'
+      )
+    associations.append(cleaned_assoc)
+  return tuple(associations)
+
+
 def _parse_code_changes(raw_map: Mapping[str, Any]) -> CodeChangesConfig:
   """Parses and validates the `scenarios.code_changes` block."""
   section = 'scenarios.code_changes'
@@ -172,25 +201,7 @@ def _parse_code_changes(raw_map: Mapping[str, Any]) -> CodeChangesConfig:
         f'Allowed: {sorted(ALLOWED_PR_MODES)}'
     )
 
-  raw_associations = raw_map.get(
-      'allowed_author_associations',
-      list(DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS),
-  )
-  if not isinstance(raw_associations, list) or not raw_associations:
-    raise ConfigValidationError(
-        'scenarios.code_changes.allowed_author_associations must be a '
-        'non-empty list.'
-    )
-  associations: list[str] = []
-  for item in raw_associations:
-    cleaned_assoc = str(item).strip().upper() if isinstance(item, str) else ''
-    if not cleaned_assoc or cleaned_assoc not in ALLOWED_AUTHOR_ASSOCIATIONS:
-      raise ConfigValidationError(
-          f'Unsupported author_association: {item!r}. '
-          f'Allowed: {sorted(ALLOWED_AUTHOR_ASSOCIATIONS)}'
-      )
-    associations.append(cleaned_assoc)
-
+  associations = _parse_author_associations(raw_map, section)
   raw_allow_fork_prs = _require_bool(
       raw_map, 'allow_fork_prs', False, section
   )
@@ -200,7 +211,7 @@ def _parse_code_changes(raw_map: Mapping[str, Any]) -> CodeChangesConfig:
       triggers=tuple(triggers),
       trigger_command=trigger_command,
       pr_mode=pr_mode,
-      allowed_author_associations=tuple(associations),
+      allowed_author_associations=associations,
       allow_fork_prs=raw_allow_fork_prs,
   )
 
@@ -209,27 +220,24 @@ def _parse_issue_impl(raw_map: Mapping[str, Any]) -> IssueImplementationConfig:
   """Parses and validates the `scenarios.issue_implementation` block."""
   section = 'scenarios.issue_implementation'
   enabled = _require_bool(raw_map, 'enabled', False, section)
-  if enabled:
-    raise ConfigValidationError(
-        'scenarios.issue_implementation is a work in progress and is not '
-        'available yet (enabled must be false).'
-    )
   raw_triggers = raw_map.get(
-      'triggers', ['issues.labeled', 'issue_comment.created']
+      'triggers',
+      ['issues.opened', 'issues.labeled', 'issue_comment.created'],
   )
-  if not isinstance(raw_triggers, list):
+  if not isinstance(raw_triggers, list) or not raw_triggers:
     raise ConfigValidationError(
-        'scenarios.issue_implementation.triggers must be a list.'
+        'scenarios.issue_implementation.triggers must be a non-empty list.'
     )
   triggers: list[str] = []
   for item in raw_triggers:
     if not isinstance(item, str) or item not in ALLOWED_ISSUE_TRIGGERS:
       raise ConfigValidationError(
-          f'Unsupported issue_implementation trigger: {item!r}.'
+          f'Unsupported issue_implementation trigger: {item!r}. '
+          f'Allowed: {sorted(ALLOWED_ISSUE_TRIGGERS)}'
       )
     triggers.append(item)
 
-  raw_labels = raw_map.get('trigger_labels', ['cloud-operator-implement'])
+  raw_labels = raw_map.get('trigger_labels', [])
   if not isinstance(raw_labels, list):
     raise ConfigValidationError(
         'scenarios.issue_implementation.trigger_labels must be a list.'
@@ -251,15 +259,22 @@ def _parse_issue_impl(raw_map: Mapping[str, Any]) -> IssueImplementationConfig:
         'scenarios.issue_implementation.trigger_command must be a non-empty '
         'string.'
     )
-  base_branch = (
-      _require_str(raw_map, 'base_branch', 'main', section) or 'main'
-  )
+
+  base_branch = _require_str(raw_map, 'base_branch', 'main', section)
+  if not base_branch:
+    raise ConfigValidationError(
+        'scenarios.issue_implementation.base_branch must be a non-empty string.'
+    )
+
+  associations = _parse_author_associations(raw_map, section)
+
   return IssueImplementationConfig(
       enabled=enabled,
       triggers=tuple(triggers),
       trigger_labels=tuple(labels),
       trigger_command=trigger_command,
       base_branch=base_branch,
+      allowed_author_associations=associations,
   )
 
 
@@ -418,6 +433,29 @@ def is_fork_pull_request(pull_request: Mapping[str, Any]) -> bool:
   return False
 
 
+def _matches_trigger_command(comment_body: str, trigger_command: str) -> bool:
+  """Returns True if `trigger_command` starts a line outside fenced blocks."""
+  body_without_fences = _FENCED_COMMENT_BLOCK_RE.sub('', comment_body)
+  pattern = rf'(?m)^[^\S\r\n]*{re.escape(trigger_command)}(?:\s|$)'
+  return bool(re.search(pattern, body_without_fences))
+
+
+def _extract_issue_label_names(issue: Mapping[str, Any]) -> set[str]:
+  """Extracts lowercase label names attached to a GitHub `issue` object."""
+  raw_labels = issue.get('labels')
+  if not isinstance(raw_labels, list):
+    return set()
+  names: set[str] = set()
+  for entry in raw_labels:
+    if isinstance(entry, Mapping):
+      name = entry.get('name')
+      if isinstance(name, str) and name.strip():
+        names.add(name.strip().lower())
+    elif isinstance(entry, str) and entry.strip():
+      names.add(entry.strip().lower())
+  return names
+
+
 def should_trigger_code_review(
     repo_config: AutoCloudRepoConfig,
     event_name: str,
@@ -425,8 +463,9 @@ def should_trigger_code_review(
 ) -> bool:
   """Determines whether a GitHub event should trigger a PR code review.
 
-  Skips draft PRs, Companion PR branches (`cloud-operator/remediate-pr-*`),
-  untrusted author associations, and fork PRs (unless `allow_fork_prs` is True).
+  Skips draft PRs, Cloud Operator branches (`cloud-operator/remediate-pr-*` and
+  `cloud-operator/issue-*`), untrusted author associations, and fork PRs
+  (unless `allow_fork_prs` is True).
 
   Args:
     repo_config: Validated repository configuration.
@@ -458,7 +497,9 @@ def should_trigger_code_review(
       return False
     head_info = pull_request.get('head') or {}
     head_ref = str(head_info.get('ref', ''))
-    if head_ref.startswith(COMPANION_BRANCH_PREFIX):
+    if head_ref.startswith(COMPANION_BRANCH_PREFIX) or head_ref.startswith(
+        ISSUE_COMPANION_BRANCH_PREFIX
+    ):
       return False
     return True
 
@@ -474,8 +515,74 @@ def should_trigger_code_review(
       return False
     raw_body = comment.get('body')
     comment_body = str(raw_body) if isinstance(raw_body, str) else ''
-    body_without_fences = _FENCED_COMMENT_BLOCK_RE.sub('', comment_body)
-    pattern = rf'(?m)^[^\S\r\n]*{re.escape(code_cfg.trigger_command)}(?:\s|$)'
-    return bool(re.search(pattern, body_without_fences))
+    return _matches_trigger_command(comment_body, code_cfg.trigger_command)
+
+  return False
+
+
+def should_trigger_issue_implementation(
+    repo_config: AutoCloudRepoConfig,
+    event_name: str,
+    event_payload: Mapping[str, Any],
+) -> bool:
+  """Determines whether a GitHub event should trigger Issue Implementation.
+
+  Strictly ignores Pull Request events and Pull Request comments (`'pull_request'
+  in issue`), enforces `allowed_author_associations`, applies optional
+  `trigger_labels` filtering to `issues.opened` / `issues.labeled`, and matches
+  `trigger_command` on `issue_comment.created`.
+
+  Args:
+    repo_config: Validated repository configuration.
+    event_name: GitHub Actions `GITHUB_EVENT_NAME` (`issues` or `issue_comment`).
+    event_payload: Decoded JSON from `GITHUB_EVENT_PATH`.
+
+  Returns:
+    True if the Issue Implementation workflow should execute, False otherwise.
+  """
+  issue_cfg = repo_config.scenarios.issue_implementation
+  if not issue_cfg.enabled:
+    return False
+
+  action = str(event_payload.get('action', '')).strip()
+  qualified_event = f'{event_name}.{action}' if action else event_name
+  if qualified_event not in issue_cfg.triggers:
+    return False
+
+  issue = event_payload.get('issue') or {}
+  if not isinstance(issue, Mapping) or 'pull_request' in issue:
+    return False
+
+  if event_name == 'issues':
+    issue_assoc = str(issue.get('author_association') or '').strip().upper()
+    if issue_assoc not in issue_cfg.allowed_author_associations:
+      return False
+
+    if issue_cfg.trigger_labels:
+      allowed_labels = {lbl.lower() for lbl in issue_cfg.trigger_labels}
+      if action == 'labeled':
+        label_obj = event_payload.get('label')
+        added_name = (
+            str(label_obj.get('name', '')).strip().lower()
+            if isinstance(label_obj, Mapping)
+            else ''
+        )
+        if added_name:
+          return added_name in allowed_labels
+      issue_labels = _extract_issue_label_names(issue)
+      return bool(issue_labels & allowed_labels)
+
+    return True
+
+  if event_name == 'issue_comment':
+    comment = event_payload.get('comment') or {}
+    if not isinstance(comment, Mapping):
+      return False
+    author_assoc = str(comment.get('author_association') or '').strip().upper()
+    if author_assoc not in issue_cfg.allowed_author_associations:
+      return False
+    raw_body = comment.get('body')
+    comment_body = str(raw_body) if isinstance(raw_body, str) else ''
+    return _matches_trigger_command(comment_body, issue_cfg.trigger_command)
 
   return False
