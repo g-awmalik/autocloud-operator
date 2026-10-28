@@ -330,6 +330,71 @@ class ParserTest(absltest.TestCase):
     self.assertEqual(clamped[0].start_line, 19)
     self.assertEqual(clamped[0].line, 23)
 
+  def test_strip_remediated_file_blocks_removes_file_blocks_and_preserves_other_blocks(
+      self,
+  ):
+    markdown = (
+        '### Summary of Findings\n'
+        '1. Enable uniform bucket-level access.\n\n'
+        'Run the following command to verify:\n'
+        '```bash\n'
+        'gcloud storage buckets describe gs://my-bucket\n'
+        '```\n\n'
+        '### Complete Remediated Files\n'
+        'Here is the complete remediated content for `main.tf`:\n\n'
+        '```hcl title="main.tf"\n'
+        'resource "google_storage_bucket" "b" {\n'
+        '  uniform_bucket_level_access = true\n'
+        '}\n'
+        '```\n'
+    )
+    stripped = parser.strip_remediated_file_blocks(markdown)
+    self.assertIn('### Summary of Findings', stripped)
+    self.assertIn('gcloud storage buckets describe gs://my-bucket', stripped)
+    self.assertNotIn('title="main.tf"', stripped)
+    self.assertNotIn('uniform_bucket_level_access = true', stripped)
+    self.assertNotIn('### Complete Remediated Files', stripped)
+    self.assertNotIn('Here is the complete remediated content', stripped)
+
+  def test_merge_inline_comments_preserves_non_overlapping_remediated_diffs(
+      self,
+  ):
+    explicit = [
+        parser.InlineReviewComment(
+            path='main.tf',
+            line=3,
+            body='Enable uniform bucket-level access on the new bucket.',
+        )
+    ]
+    diff_derived = [
+        parser.InlineReviewComment(
+            path='main.tf',
+            line=3,
+            body=(
+                '**Cloud Operator Suggested Remediation:**\n'
+                '```suggestion\n  uniform_bucket_level_access = true\n```'
+            ),
+        ),
+        parser.InlineReviewComment(
+            path='main.tf',
+            line=15,
+            body=(
+                '**Cloud Operator Suggested Remediation:**\n'
+                '```suggestion\n  public_access_prevention = "enforced"\n```'
+            ),
+        ),
+    ]
+    merged = parser.merge_inline_comments(explicit, diff_derived)
+    self.assertLen(merged, 2)
+    self.assertEqual(merged[0].line, 3)
+    self.assertIn(
+        'Enable uniform bucket-level access on the new bucket.',
+        merged[0].body,
+    )
+    self.assertIn('uniform_bucket_level_access = true', merged[0].body)
+    self.assertEqual(merged[1].line, 15)
+    self.assertIn('public_access_prevention = "enforced"', merged[1].body)
+
 
 if __name__ == '__main__':
   absltest.main()

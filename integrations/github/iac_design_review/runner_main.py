@@ -273,15 +273,12 @@ def _run_code_review(
 
   remediated = parser.extract_remediated_files(answer.content)
   explicit_inline = parser.extract_inline_comments(answer.content)
-  covered_paths = {item.path for item in explicit_inline}
-  unmatched_remediated = [
-      rem for rem in remediated if rem.path not in covered_paths
-  ]
   diff_inline = parser.build_inline_comments_from_remediated_files(
-      changed_files, unmatched_remediated
+      changed_files, remediated
   )
+  merged_inline = parser.merge_inline_comments(explicit_inline, diff_inline)
   all_inline = parser.clamp_inline_comments_to_files(
-      [*explicit_inline, *diff_inline], changed_files
+      merged_inline, changed_files
   )
 
   logging.info(
@@ -293,7 +290,9 @@ def _run_code_review(
       len(remediated),
   )
 
-  clean_summary = parser.strip_inline_comments_json_block(answer.content)
+  clean_summary = parser.strip_remediated_file_blocks(
+      parser.strip_inline_comments_json_block(answer.content)
+  )
 
   if dry_run_github:
     if remediated:
@@ -429,7 +428,9 @@ def _run_issue_implementation(
   )
 
   remediated = parser.extract_remediated_files(answer.content)
-  clean_summary = parser.strip_inline_comments_json_block(answer.content)
+  clean_summary = parser.strip_remediated_file_blocks(
+      parser.strip_inline_comments_json_block(answer.content)
+  )
   logging.info(
       'Received Cloud Operator issue implementation response (issue=#%d, '
       'context_id=%s, files=%d).',
