@@ -154,6 +154,12 @@ _VISIBLE_SESSION_ID_RE = re.compile(
     r'Run\s*/?\s*Session\s+ID:', re.IGNORECASE
 )
 
+_VISIBLE_SESSION_ID_LINE_RE = re.compile(
+    r'^([ \t]*ℹ️[ \t]*(?:\*\*)?Run\s*/?\s*Session\s+ID:(?:\*\*)?[ \t]*)'
+    r'[^\r\n]*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _INLINE_POINTER_LINE = (
     '👇 **Detailed inline comments and 1-click code suggestions are added '
     'on the affected files below.**'
@@ -1204,18 +1210,20 @@ def format_pr_review_summary(
   if context_id and context_id.strip():
     short_session_id = context_id.strip().rsplit('/', 1)[-1]
 
-  if _SESSION_ID_PLACEHOLDER_RE.search(cleaned):
+  if _VISIBLE_SESSION_ID_LINE_RE.search(cleaned):
     if short_session_id:
-      cleaned = _SESSION_ID_PLACEHOLDER_RE.sub(
-          f'`{short_session_id}`', cleaned
+      cleaned = _VISIBLE_SESSION_ID_LINE_RE.sub(
+          rf'\g<1>`{short_session_id}`', cleaned
       )
-    else:
+    elif _SESSION_ID_PLACEHOLDER_RE.search(cleaned):
       cleaned = re.sub(
           r'^[ \t]*ℹ️[^\n]*<\s*(?:session_or_trace_id|session_id|trace_id)\s*>[^\n]*\n?',
           '',
           cleaned,
           flags=re.IGNORECASE | re.MULTILINE,
       ).strip()
+  elif _SESSION_ID_PLACEHOLDER_RE.search(cleaned) and short_session_id:
+    cleaned = _SESSION_ID_PLACEHOLDER_RE.sub(f'`{short_session_id}`', cleaned)
 
   if not has_inline_comments:
     cleaned = _INLINE_POINTER_RE.sub('', cleaned).strip()

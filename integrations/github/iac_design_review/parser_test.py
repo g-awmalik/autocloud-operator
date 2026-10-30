@@ -583,7 +583,7 @@ class ParserTest(absltest.TestCase):
         '### References\n'
         '- https://cloud.google.com/run/docs/securing/ingress\n\n'
         '---\n'
-        'ℹ️ **Run / Session ID:** `<session_or_trace_id>`\n'
+        'ℹ️ **Run / Session ID:** `63991121-cdd2-4673-8326-f558dc4a243b`\n'
         '👇 **Detailed inline comments and 1-click code suggestions are added '
         'on the affected files below.**'
     )
@@ -603,7 +603,7 @@ class ParserTest(absltest.TestCase):
     self.assertNotIn('## Detailed Findings & Recommendations', formatted)
     self.assertNotIn('### References', formatted)
     self.assertIn('ℹ️ **Run / Session ID:** `2899237340096495616`', formatted)
-    self.assertNotIn('<session_or_trace_id>', formatted)
+    self.assertNotIn('63991121-cdd2-4673-8326-f558dc4a243b', formatted)
     self.assertIn(
         '👇 **Detailed inline comments and 1-click code suggestions are added '
         'on the affected files below.**',
