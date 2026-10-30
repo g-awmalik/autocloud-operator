@@ -30,7 +30,9 @@ _CONTEXT_ID_MARKER_RE = re.compile(
 #   3: Fence info string (language tag and optional `title=...` / `:path`)
 #   4: Code block body
 _CODE_BLOCK_SCAN_RE = re.compile(
-    r'(?:(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*)?File:\s*(?:\*\*)?[ \t]*'
+    r'(?:(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*)?'
+    r'(?:(?:[Cc]omplete|[Rr]emediated|[Uu]pdated|[Mm]odified)[ \t]+)*'
+    r'[Ff]ile:\s*(?:\*\*)?[ \t]*'
     r'\[?`?([^`\]\(\)\r\n*]+?)`?\]?(?:\([^\)]*\))?[ \t]*(?:\*\*)?:?[ \t]*\r?\n+)?'
     r'(`{3,})([^\n`]*)\r?\n(.*?\r?\n)[ \t]*\2[ \t]*(?=\r?\n|$)',
     re.DOTALL,
@@ -103,18 +105,63 @@ _SUGGESTION_FENCE_EXTRACT_RE = re.compile(
     re.DOTALL,
 )
 
+_TRAILING_RULE_SUFFIX_RE = re.compile(
+    r'[ \t]*\((?:Rule(?:s|\s+ID)?|Violates):\s*([^)]+)\)(\.?)?[ \t]*$',
+    re.IGNORECASE,
+)
+
+_INLINE_REPLY_PROMPT = (
+    '💡 _Reply to this comment to ask Google Autocloud follow-up questions._'
+)
+
 # Matches trailing or empty section headings/introductory lines that only
 # introduced stripped remediated file code blocks.
 _DANGLING_REMEDIATED_INTRO_RE = re.compile(
-    r'(?:^|\n)[ \t]*(?:'
+    r'(?:^|\n)(?:[ \t]*---[ \t]*\n+)*[ \t]*(?:'
     r'(?:#{1,6}[ \t]+|\*\*\s*|\d+\.\s+\*\*|\d+\.\s+)?'
     r'(?:Complete[ \t]+)?'
     r'(?:Remediated|Updated|Modified|Implemented|Generated)[ \t]+'
+    r'(?:Repository[ \t]+|IaC[ \t]+|Terraform[ \t]+|Configuration[ \t]+)*'
     r'(?:File|Files|Code|Content|Configuration|Terraform)[^\n]*'
     r'|Here[ \t]+(?:is|are)[ \t]+the[ \t]+(?:complete[ \t]+)?'
     r'(?:remediated|updated|modified|implemented)[ \t]+[^\n:]*:'
-    r')[ \t]*(?=\n+#{1,6}[ \t]|\s*$)',
+    r')[ \t]*(?=\n+#{1,6}[ \t]|\n+---|\s*$)',
     re.IGNORECASE,
+)
+
+_SUMMARY_TRIAGE_TABLE_RE = re.compile(
+    r'\|\s*Severity\s*\|\s*Category\s*\|', re.IGNORECASE
+)
+
+_DUPLICATE_DETAILED_FINDINGS_RE = re.compile(
+    r'\n+(?:---\s*\n+)?#{1,3}[ \t]+(?:Detailed[ \t]+Findings|References\b)'
+    r'[\s\S]*?(?=\n+---|\n+ℹ️|\n+👇|\n+<!--|\Z)',
+    re.IGNORECASE,
+)
+
+_INTERNAL_TOOL_ERROR_NOTE_RE = re.compile(
+    r'(?:^|\n+)(?:#{1,4}[ \t]+[^\n]*Policy[ \t]+Assessment[ \t]+Note[^\n]*\n+)?'
+    r'[^\n]*POLICY_RETRIEVAL_FAILED[^\n]*(?:\n|$)',
+    re.IGNORECASE,
+)
+
+_SESSION_ID_PLACEHOLDER_RE = re.compile(
+    r'`?<\s*(?:session_or_trace_id|session_id|trace_id)\s*>`?',
+    re.IGNORECASE,
+)
+
+_VISIBLE_SESSION_ID_RE = re.compile(
+    r'Run\s*/?\s*Session\s+ID:', re.IGNORECASE
+)
+
+_INLINE_POINTER_LINE = (
+    '👇 **Detailed inline comments and 1-click code suggestions are added '
+    'on the affected files below.**'
+)
+
+_INLINE_POINTER_RE = re.compile(
+    r'^[ \t]*👇[^\n]*inline comments[^\n]*\n?',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 _FAILED_TASK_STATES = frozenset({'FAILED', 'CANCELLED', 'REJECTED'})
@@ -576,12 +623,199 @@ def extract_remediated_files(markdown_text: str) -> list[RemediatedFile]:
   return files
 
 
+def _severity_emoji(severity: str) -> str:
+  """Maps a finding severity label to its UX status emoji."""
+  normalized = severity.strip().lower()
+  if normalized in ('critical', 'high'):
+    return '🔴'
+  if normalized in ('medium', 'moderate'):
+    return '🟠'
+  if normalized in ('low', 'info', 'informational'):
+    return '🟡'
+  return '🔴'
+
+
+def _format_inline_comment_body(
+    item: Mapping[str, Any],
+    *,
+    change_index: int,
+    total_changes: int,
+) -> str:
+  """Assembles an inline review comment with all text above the suggestion diff.
+
+  Follows the UX M2 hierarchy (Figma `1722:6170`):
+    1. Minimal header: `### <🔴/🟠/🟡> #<finding_id>: <title> (<X>/<Y>)`
+    2. Crisp 1–2 sentence explanation (with redundant trailing `(Rule: ...)`
+       stripped when `rule_id` is rendered in `Source:`).
+    3. `**Source:**` and `**Resource affected:**` metadata lines.
+    4. Optional `<details>` block for multi-attribute `key_changes` (collapsed
+       by default).
+    5. Optional 3-tier GitHub alert callouts (`[!WARNING]`, `[!IMPORTANT]`,
+       `[!CAUTION]`).
+    6. Follow-up prompt (`💡 _Reply to this comment..._`).
+    7. ````suggestion` block at the very bottom.
+
+  Args:
+    item: Parsed JSON comment object from `cloud-operator-inline-comments`.
+    change_index: 1-based index of this change within `finding_id`.
+    total_changes: Total number of inline changes for `finding_id`.
+
+  Returns:
+    Assembled Markdown body string, or empty string if no content is present.
+  """
+  finding_id = _safe_int(item.get('finding_id'), 0)
+  title = str(item.get('title') or '').strip()
+  severity = str(item.get('severity') or '').strip()
+  sev_emoji = _severity_emoji(severity)
+
+  header = ''
+  if title and finding_id > 0:
+    header = (
+        f'### {sev_emoji} #{finding_id}: {title} '
+        f'({change_index}/{total_changes})'
+    )
+  elif title:
+    header = f'### {sev_emoji} {title}'
+  elif finding_id > 0:
+    header = f'### {sev_emoji} #{finding_id} ({change_index}/{total_changes})'
+
+  raw_body = str(item.get('body') or item.get('comment') or '').strip()
+  embedded_sugg_fence = ''
+  sugg_in_body = _SUGGESTION_FENCE_EXTRACT_RE.search(raw_body)
+  if sugg_in_body:
+    embedded_sugg_fence = sugg_in_body.group(1).strip()
+    raw_body = (
+        raw_body[: sugg_in_body.start()] + raw_body[sugg_in_body.end() :]
+    ).strip()
+
+  guideline_label = str(item.get('guideline_label') or '').strip()
+  guideline_url = str(item.get('guideline_url') or '').strip()
+  rule_id = str(item.get('rule_id') or '').strip().strip('`')
+  resource = str(item.get('resource') or '').strip()
+
+  trailing_rule_match = _TRAILING_RULE_SUFFIX_RE.search(raw_body)
+  if trailing_rule_match:
+    extracted_rule = trailing_rule_match.group(1).strip().strip('`')
+    if not rule_id and extracted_rule:
+      rule_id = extracted_rule
+    if rule_id:
+      prefix = raw_body[: trailing_rule_match.start()].rstrip()
+      trailing_dot = trailing_rule_match.group(2) or ''
+      if trailing_dot and prefix and prefix[-1] not in '.!?':
+        prefix = f'{prefix}.'
+      raw_body = prefix
+
+  source_parts: list[str] = []
+  if guideline_label and guideline_url:
+    source_parts.append(f'[{guideline_label}]({guideline_url})')
+  elif guideline_label:
+    source_parts.append(guideline_label)
+  elif guideline_url:
+    source_parts.append(guideline_url)
+  if rule_id:
+    source_parts.append(f'Rule ID: `{rule_id}`')
+
+  meta_lines: list[str] = []
+  if source_parts:
+    meta_lines.append(f"**Source:** {' · '.join(source_parts)}")
+  if resource:
+    formatted_res = resource if '`' in resource else f'`{resource}`'
+    meta_lines.append(f'**Resource affected:** {formatted_res}')
+  meta_block = '\n'.join(meta_lines)
+
+  details_block = ''
+  raw_key_changes = item.get('key_changes')
+  if isinstance(raw_key_changes, Sequence) and not isinstance(
+      raw_key_changes, (str, bytes)
+  ):
+    cleaned_changes = [
+        str(entry).strip().lstrip('-* ').strip()
+        for entry in raw_key_changes
+        if str(entry).strip()
+    ]
+    if cleaned_changes:
+      bullets = '\n'.join(f'- {entry}' for entry in cleaned_changes)
+      details_block = (
+          '<details>\n'
+          '<summary><b>Key changes</b></summary>\n\n'
+          f'{bullets}\n'
+          '</details>'
+      )
+
+  warning_block = ''
+  disruptive_warning = str(item.get('disruptive_warning') or '').strip()
+  if disruptive_warning:
+    warning_block = (
+        f'> [!WARNING]\n'
+        f'> **⚠️ Warning (Disruptive change):** {disruptive_warning}'
+    )
+
+  important_block = ''
+  cost_important = str(item.get('cost_important') or '').strip()
+  if cost_important:
+    important_block = (
+        f'> [!IMPORTANT]\n> **📋 Important (Cost impact):** {cost_important}'
+    )
+
+  caution_block = ''
+  action_caution = str(item.get('action_required_caution') or '').strip()
+  if action_caution:
+    caution_block = (
+        f'> [!CAUTION]\n'
+        f'> **🛠️ Action Required Before Applying:** {action_caution}'
+    )
+
+  suggestion_fence = embedded_sugg_fence
+  raw_suggestion = item.get('suggestion')
+  if isinstance(raw_suggestion, str) and not suggestion_fence:
+    outer_match = _OUTER_CODE_FENCE_RE.match(raw_suggestion)
+    unwrapped_sugg = outer_match.group(2) if outer_match else raw_suggestion
+    clean_sugg = _strip_line_number_prefixes(unwrapped_sugg).rstrip('\n')
+    suggestion_fence = f'```suggestion\n{clean_sugg}\n```'
+
+  has_text_above_diff = any((
+      header,
+      raw_body,
+      meta_block,
+      details_block,
+      warning_block,
+      important_block,
+      caution_block,
+  ))
+  reply_line = ''
+  if (
+      has_text_above_diff
+      and 'Reply to this comment' not in raw_body
+  ):
+    reply_line = _INLINE_REPLY_PROMPT
+
+  return '\n\n'.join(
+      filter(
+          None,
+          [
+              header,
+              raw_body,
+              meta_block,
+              details_block,
+              warning_block,
+              important_block,
+              caution_block,
+              reply_line,
+              suggestion_fence,
+          ],
+      )
+  )
+
+
 def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
   """Extracts structured inline PR review comments from the agent's response.
 
   Parses `title="cloud-operator-inline-comments"` JSON code blocks containing a
-  list of comment objects (`path`, `line`, optional `start_line`, `body`, and
-  optional `suggestion`).
+  list of comment objects (`path`, `line`, optional `start_line`, `body`,
+  optional `suggestion`, and UX M2 fields `finding_id`, `change_index`,
+  `total_changes_for_finding`, `title`, `severity`, `guideline_label`,
+  `guideline_url`, `rule_id`, `resource`, `key_changes`, `disruptive_warning`,
+  `cost_important`, and `action_required_caution`).
 
   Args:
     markdown_text: Full markdown response from `ask_cloud_operator`.
@@ -602,6 +836,8 @@ def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
     else:
       continue
 
+    valid_items: list[tuple[Mapping[str, Any], str, int, int | None]] = []
+    finding_totals: dict[int, int] = {}
     for item in items:
       if not isinstance(item, Mapping):
         continue
@@ -627,17 +863,32 @@ def extract_inline_comments(markdown_text: str) -> list[InlineReviewComment]:
           start_line_val = line
           line = cand_start
 
-      body = str(item.get('body') or item.get('comment') or '').strip()
-      suggestion = item.get('suggestion')
-      if isinstance(suggestion, str) and '```suggestion' not in body:
-        outer_match = _OUTER_CODE_FENCE_RE.match(suggestion)
-        unwrapped_sugg = outer_match.group(2) if outer_match else suggestion
-        clean_sugg = _strip_line_number_prefixes(unwrapped_sugg).rstrip('\n')
-        body = (
-            f'{body}\n\n```suggestion\n{clean_sugg}\n```'
-            if body
-            else f'```suggestion\n{clean_sugg}\n```'
+      finding_id = _safe_int(item.get('finding_id'), 0)
+      if finding_id > 0:
+        finding_totals[finding_id] = finding_totals.get(finding_id, 0) + 1
+      valid_items.append((item, safe_path, line, start_line_val))
+
+    finding_seen: dict[int, int] = {}
+    for item, safe_path, line, start_line_val in valid_items:
+      finding_id = _safe_int(item.get('finding_id'), 0)
+      change_idx = 1
+      total_changes = 1
+      if finding_id > 0:
+        finding_seen[finding_id] = finding_seen.get(finding_id, 0) + 1
+        change_idx = (
+            _safe_int(item.get('change_index'), 0) or finding_seen[finding_id]
         )
+        total_changes = _safe_int(
+            item.get('total_changes_for_finding')
+            or item.get('total_changes'),
+            0,
+        ) or max(change_idx, finding_totals.get(finding_id, 1))
+
+      body = _format_inline_comment_body(
+          item,
+          change_index=change_idx,
+          total_changes=total_changes,
+      )
       if not body:
         continue
 
@@ -815,17 +1066,15 @@ def merge_inline_comments(
     Combined list of `InlineReviewComment` objects.
   """
   merged: list[InlineReviewComment] = list(explicit_comments)
-  num_explicit = len(merged)
+  diff_to_exp: list[list[int]] = [[] for _ in range(len(diff_comments))]
+  exp_to_diff: list[list[int]] = [[] for _ in range(len(explicit_comments))]
 
-  for diff_cmt in diff_comments:
+  for d_idx, diff_cmt in enumerate(diff_comments):
     diff_start = (
         diff_cmt.start_line if diff_cmt.start_line is not None else diff_cmt.line
     )
     diff_end = diff_cmt.line
-    overlapped = False
-
-    for idx in range(num_explicit):
-      exp_cmt = merged[idx]
+    for e_idx, exp_cmt in enumerate(explicit_comments):
       if exp_cmt.path != diff_cmt.path:
         continue
       exp_start = (
@@ -833,23 +1082,31 @@ def merge_inline_comments(
       )
       exp_end = exp_cmt.line
       if max(exp_start, diff_start) <= min(exp_end, diff_end):
-        overlapped = True
+        diff_to_exp[d_idx].append(e_idx)
+        exp_to_diff[e_idx].append(d_idx)
+
+  for d_idx, diff_cmt in enumerate(diff_comments):
+    overlapping_exps = diff_to_exp[d_idx]
+    if not overlapping_exps:
+      merged.append(diff_cmt)
+      continue
+
+    if len(overlapping_exps) == 1:
+      e_idx = overlapping_exps[0]
+      if len(exp_to_diff[e_idx]) == 1:
+        exp_cmt = merged[e_idx]
         if (
             '```suggestion' not in exp_cmt.body
             and '```suggestion' in diff_cmt.body
         ):
           sugg_match = _SUGGESTION_FENCE_EXTRACT_RE.search(diff_cmt.body)
           if sugg_match:
-            merged[idx] = InlineReviewComment(
+            merged[e_idx] = InlineReviewComment(
                 path=exp_cmt.path,
                 line=diff_cmt.line,
                 start_line=diff_cmt.start_line,
                 body=f'{exp_cmt.body.rstrip()}\n\n{sugg_match.group(1)}',
             )
-        break
-
-    if not overlapped:
-      merged.append(diff_cmt)
 
   return merged
 
@@ -890,7 +1147,7 @@ def strip_remediated_file_blocks(markdown_text: str) -> str:
   cleaned = ''.join(pieces)
 
   # Strip dangling headings/intro lines that only introduced the removed blocks.
-  for _ in range(2):
+  while True:
     updated = _DANGLING_REMEDIATED_INTRO_RE.sub('', cleaned)
     if updated == cleaned:
       break
@@ -916,6 +1173,70 @@ def embed_context_id_marker(
   if not context_id:
     return comment_body
   return f'{comment_body.rstrip()}\n\n<!-- cloud-operator-context-id: {context_id} -->'
+
+
+def format_pr_review_summary(
+    summary_markdown: str,
+    context_id: str | None = None,
+    *,
+    has_inline_comments: bool = False,
+) -> str:
+  """Formats the top-level PR review summary according to the UX M2 spec.
+
+  Cleans up any leaked internal tool error diagnostics or duplicate prose
+  sections when a 4-column triage table is present, populates the visible
+  `ℹ️ **Run / Session ID:**` audit footer and inline comments pointer, and
+  embeds the hidden `<!-- cloud-operator-context-id: ... -->` continuity marker.
+
+  Args:
+    summary_markdown: Top-level PR summary markdown with code blocks stripped.
+    context_id: Optional Cloud Operator session/context ID from MCP.
+    has_inline_comments: Whether inline review comments are attached to the PR.
+
+  Returns:
+    Formatted top-level PR review summary markdown.
+  """
+  cleaned = _INTERNAL_TOOL_ERROR_NOTE_RE.sub('\n', summary_markdown).strip()
+  if _SUMMARY_TRIAGE_TABLE_RE.search(cleaned):
+    cleaned = _DUPLICATE_DETAILED_FINDINGS_RE.sub('', cleaned).strip()
+
+  short_session_id = ''
+  if context_id and context_id.strip():
+    short_session_id = context_id.strip().rsplit('/', 1)[-1]
+
+  if _SESSION_ID_PLACEHOLDER_RE.search(cleaned):
+    if short_session_id:
+      cleaned = _SESSION_ID_PLACEHOLDER_RE.sub(
+          f'`{short_session_id}`', cleaned
+      )
+    else:
+      cleaned = re.sub(
+          r'^[ \t]*ℹ️[^\n]*<\s*(?:session_or_trace_id|session_id|trace_id)\s*>[^\n]*\n?',
+          '',
+          cleaned,
+          flags=re.IGNORECASE | re.MULTILINE,
+      ).strip()
+
+  if not has_inline_comments:
+    cleaned = _INLINE_POINTER_RE.sub('', cleaned).strip()
+
+  footer_lines: list[str] = []
+  if short_session_id and not _VISIBLE_SESSION_ID_RE.search(cleaned):
+    footer_lines.append(f'ℹ️ **Run / Session ID:** `{short_session_id}`')
+  if has_inline_comments and not _INLINE_POINTER_RE.search(cleaned):
+    footer_lines.append(_INLINE_POINTER_LINE)
+
+  if footer_lines:
+    footer_block = '\n'.join(footer_lines)
+    if re.search(r'(?:^|\n)---[ \t]*$', cleaned):
+      cleaned = f'{cleaned}\n{footer_block}'
+    elif _VISIBLE_SESSION_ID_RE.search(cleaned):
+      cleaned = f'{cleaned}\n{footer_block}'
+    else:
+      cleaned = f'{cleaned}\n\n---\n{footer_block}'
+
+  cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+  return embed_context_id_marker(cleaned, context_id)
 
 
 def extract_context_id_marker(comments: Sequence[str]) -> str | None:

@@ -281,6 +281,145 @@ class ParserTest(absltest.TestCase):
         comments[0].body,
     )
 
+  def test_extract_inline_comments_formats_enriched_ux_m2_hierarchy(self):
+    markdown = (
+        '```json title="cloud-operator-inline-comments"\n'
+        '[\n'
+        '  {\n'
+        '    "finding_id": 1,\n'
+        '    "path": "main.tf",\n'
+        '    "line": 65,\n'
+        '    "title": "Restrict Cloud Run ingress to Internal Load Balancer",\n'
+        '    "severity": "High",\n'
+        '    "body": "Cloud Run uses `INGRESS_TRAFFIC_ALL`, bypassing the LB '
+        '(Rule: `run_ingress_settings`).",\n'
+        '    "guideline_label": "Cloud Run Ingress Settings",\n'
+        '    "guideline_url": '
+        '"https://cloud.google.com/run/docs/securing/ingress",\n'
+        '    "rule_id": "run_ingress_settings (constraints/run.allowedIngress)",\n'
+        '    "resource": "module.cloud_run",\n'
+        '    "key_changes": [],\n'
+        '    "disruptive_warning": "Direct `*.run.app` URLs will reject '
+        'external requests.",\n'
+        '    "cost_important": "",\n'
+        '    "action_required_caution": "",\n'
+        '    "suggestion": "  ingress = \\"INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER\\""\n'
+        '  },\n'
+        '  {\n'
+        '    "finding_id": 1,\n'
+        '    "path": "outputs.tf",\n'
+        '    "start_line": 6,\n'
+        '    "line": 10,\n'
+        '    "title": "Export Global Load Balancer IP",\n'
+        '    "severity": "High",\n'
+        '    "body": "Export the LB IP for external callers.",\n'
+        '    "guideline_label": "Cloud Run Ingress Settings",\n'
+        '    "guideline_url": '
+        '"https://cloud.google.com/run/docs/securing/ingress",\n'
+        '    "rule_id": "run_ingress_settings",\n'
+        '    "resource": "`output.cloud_run_urls`, `output.lb_ip`",\n'
+        '    "suggestion": "output \\"lb_ip\\" {\\n  value = module.lb.ip\\n}"\n'
+        '  },\n'
+        '  {\n'
+        '    "finding_id": 2,\n'
+        '    "change_index": 1,\n'
+        '    "total_changes_for_finding": 1,\n'
+        '    "path": "main.tf",\n'
+        '    "start_line": 164,\n'
+        '    "line": 168,\n'
+        '    "title": "Enforce UBLA, public access prevention, and versioning",\n'
+        '    "severity": "Medium",\n'
+        '    "body": "Bucket permits legacy ACLs and lacks versioning.\\n\\n'
+        '```suggestion\\n  uniform_bucket_level_access = true\\n```",\n'
+        '    "guideline_label": "GCS Public Access Prevention",\n'
+        '    "guideline_url": '
+        '"https://cloud.google.com/storage/docs/public-access-prevention",\n'
+        '    "rule_id": "gcs_prevent_public",\n'
+        '    "resource": "google_storage_bucket.test_bucket",\n'
+        '    "key_changes": [\n'
+        '      "Add `uniform_bucket_level_access = true`.",\n'
+        '      "Enable `versioning { enabled = true }`."\n'
+        '    ],\n'
+        '    "disruptive_warning": "Rejects legacy per-object ACL calls.",\n'
+        '    "cost_important": "Object versioning increases storage costs.",\n'
+        '    "action_required_caution": "Replace placeholder bucket name."\n'
+        '  }\n'
+        ']\n'
+        '```\n'
+    )
+    comments = parser.extract_inline_comments(markdown)
+    self.assertLen(comments, 3)
+
+    c1 = comments[0].body
+    self.assertIn(
+        '### 🔴 #1: Restrict Cloud Run ingress to Internal Load Balancer (1/2)',
+        c1,
+    )
+    self.assertIn('Cloud Run uses `INGRESS_TRAFFIC_ALL`, bypassing the LB.', c1)
+    self.assertNotIn('(Rule:', c1)
+    self.assertIn(
+        '**Source:** [Cloud Run Ingress Settings]'
+        '(https://cloud.google.com/run/docs/securing/ingress) · '
+        'Rule ID: `run_ingress_settings (constraints/run.allowedIngress)`',
+        c1,
+    )
+    self.assertIn('**Resource affected:** `module.cloud_run`', c1)
+    self.assertIn(
+        '> [!WARNING]\n> **⚠️ Warning (Disruptive change):** '
+        'Direct `*.run.app` URLs will reject external requests.',
+        c1,
+    )
+    self.assertIn(
+        '💡 _Reply to this comment to ask Google Autocloud follow-up '
+        'questions._',
+        c1,
+    )
+    self.assertTrue(
+        c1.endswith(
+            '```suggestion\n'
+            '  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"\n'
+            '```'
+        )
+    )
+
+    c2 = comments[1].body
+    self.assertIn('### 🔴 #1: Export Global Load Balancer IP (2/2)', c2)
+    self.assertIn(
+        '**Resource affected:** `output.cloud_run_urls`, `output.lb_ip`', c2
+    )
+
+    c3 = comments[2].body
+    self.assertIn(
+        '### 🟠 #2: Enforce UBLA, public access prevention, and versioning (1/1)',
+        c3,
+    )
+    self.assertIn(
+        '<details>\n<summary><b>Key changes</b></summary>\n\n'
+        '- Add `uniform_bucket_level_access = true`.\n'
+        '- Enable `versioning { enabled = true }`.\n'
+        '</details>',
+        c3,
+    )
+    self.assertNotIn('<details open', c3)
+    # Verify strict top-to-bottom ordering above the ```suggestion block.
+    idx_header = c3.index('### 🟠 #2:')
+    idx_prose = c3.index('Bucket permits legacy ACLs')
+    idx_source = c3.index('**Source:**')
+    idx_details = c3.index('<details>')
+    idx_warning = c3.index('> [!WARNING]')
+    idx_important = c3.index('> [!IMPORTANT]')
+    idx_caution = c3.index('> [!CAUTION]')
+    idx_reply = c3.index('💡 _Reply to this comment')
+    idx_sugg = c3.index('```suggestion')
+    self.assertLess(idx_header, idx_prose)
+    self.assertLess(idx_prose, idx_source)
+    self.assertLess(idx_source, idx_details)
+    self.assertLess(idx_details, idx_warning)
+    self.assertLess(idx_warning, idx_important)
+    self.assertLess(idx_important, idx_caution)
+    self.assertLess(idx_caution, idx_reply)
+    self.assertLess(idx_reply, idx_sugg)
+
   def test_build_inline_comments_from_remediated_files_diffs_lines(self):
     original = {
         'main.tf': (
@@ -346,6 +485,13 @@ class ParserTest(absltest.TestCase):
         'resource "google_storage_bucket" "b" {\n'
         '  uniform_bucket_level_access = true\n'
         '}\n'
+        '```\n\n'
+        'Here is the updated file for `variables.tf`:\n'
+        '### Updated File: `variables.tf`\n'
+        '```hcl\n'
+        'variable "project_id" {\n'
+        '  type = string\n'
+        '}\n'
         '```\n'
     )
     stripped = parser.strip_remediated_file_blocks(markdown)
@@ -353,8 +499,10 @@ class ParserTest(absltest.TestCase):
     self.assertIn('gcloud storage buckets describe gs://my-bucket', stripped)
     self.assertNotIn('title="main.tf"', stripped)
     self.assertNotIn('uniform_bucket_level_access = true', stripped)
+    self.assertNotIn('variable "project_id"', stripped)
     self.assertNotIn('### Complete Remediated Files', stripped)
     self.assertNotIn('Here is the complete remediated content', stripped)
+    self.assertNotIn('Here is the updated file', stripped)
 
   def test_merge_inline_comments_preserves_non_overlapping_remediated_diffs(
       self,
@@ -364,7 +512,13 @@ class ParserTest(absltest.TestCase):
             path='main.tf',
             line=3,
             body='Enable uniform bucket-level access on the new bucket.',
-        )
+        ),
+        parser.InlineReviewComment(
+            path='variables.tf',
+            start_line=1,
+            line=20,
+            body='Broad comment covering lines 1 to 20.',
+        ),
     ]
     diff_derived = [
         parser.InlineReviewComment(
@@ -383,17 +537,100 @@ class ParserTest(absltest.TestCase):
                 '```suggestion\n  public_access_prevention = "enforced"\n```'
             ),
         ),
+        parser.InlineReviewComment(
+            path='variables.tf',
+            line=3,
+            body='```suggestion\n  default = "a"\n```',
+        ),
+        parser.InlineReviewComment(
+            path='variables.tf',
+            line=15,
+            body='```suggestion\n  default = "b"\n```',
+        ),
     ]
     merged = parser.merge_inline_comments(explicit, diff_derived)
-    self.assertLen(merged, 2)
+    self.assertLen(merged, 3)
     self.assertEqual(merged[0].line, 3)
     self.assertIn(
         'Enable uniform bucket-level access on the new bucket.',
         merged[0].body,
     )
     self.assertIn('uniform_bucket_level_access = true', merged[0].body)
-    self.assertEqual(merged[1].line, 15)
-    self.assertIn('public_access_prevention = "enforced"', merged[1].body)
+    # 1-to-2 overlap on variables.tf preserves original broad range 1..20.
+    self.assertEqual(merged[1].path, 'variables.tf')
+    self.assertEqual(merged[1].start_line, 1)
+    self.assertEqual(merged[1].line, 20)
+    self.assertNotIn('```suggestion', merged[1].body)
+    # Non-overlapping diff on main.tf line 15 is appended.
+    self.assertEqual(merged[2].line, 15)
+    self.assertIn('public_access_prevention = "enforced"', merged[2].body)
+
+  def test_format_pr_review_summary_populates_session_footer_and_strips_duplicates(
+      self,
+  ):
+    raw_summary = (
+        '### Autocloud identified 2 risks in your Terraform\n\n'
+        '✅ **[Test passed]** The proposed fixes are validated against '
+        '**Terraform v1.8.2 Validate and Plan** in an isolated sandbox.\n\n'
+        '| Severity | Category | Finding & Affected Locations | Guidelines |\n'
+        '| :--- | :--- | :--- | :--- |\n'
+        '| 🔴 **High** | 🔒 Security | **#1. Restrict Cloud Run ingress** '
+        '`⚠️ Disruptive` | **Org Policy** |\n\n'
+        '### Organization Policy Assessment Note\n'
+        'Evaluation returned `DEGRADED` (`POLICY_RETRIEVAL_FAILED`).\n\n'
+        '## Detailed Findings & Recommendations\n'
+        '1. Duplicate prose finding that should be stripped.\n\n'
+        '### References\n'
+        '- https://cloud.google.com/run/docs/securing/ingress\n\n'
+        '---\n'
+        'ℹ️ **Run / Session ID:** `<session_or_trace_id>`\n'
+        '👇 **Detailed inline comments and 1-click code suggestions are added '
+        'on the affected files below.**'
+    )
+    formatted = parser.format_pr_review_summary(
+        raw_summary,
+        'projects/g4g-operate-demo/locations/global/sessions/2899237340096495616',
+        has_inline_comments=True,
+    )
+    self.assertIn(
+        '### Autocloud identified 2 risks in your Terraform', formatted
+    )
+    self.assertIn(
+        '| Severity | Category | Finding & Affected Locations | Guidelines |',
+        formatted,
+    )
+    self.assertNotIn('POLICY_RETRIEVAL_FAILED', formatted)
+    self.assertNotIn('## Detailed Findings & Recommendations', formatted)
+    self.assertNotIn('### References', formatted)
+    self.assertIn('ℹ️ **Run / Session ID:** `2899237340096495616`', formatted)
+    self.assertNotIn('<session_or_trace_id>', formatted)
+    self.assertIn(
+        '👇 **Detailed inline comments and 1-click code suggestions are added '
+        'on the affected files below.**',
+        formatted,
+    )
+    self.assertEqual(
+        parser.extract_context_id_marker([formatted]),
+        'projects/g4g-operate-demo/locations/global/sessions/2899237340096495616',
+    )
+
+  def test_format_pr_review_summary_clean_pass_omits_inline_pointer(self):
+    lgtm_summary = (
+        '✅ **No issues found** — All changes validated against '
+        '**Terraform v1.8.2 Validate and Terraform Plan**. No policy '
+        'violations detected.'
+    )
+    formatted = parser.format_pr_review_summary(
+        lgtm_summary,
+        'ctx-clean-pass-42',
+        has_inline_comments=False,
+    )
+    self.assertIn('✅ **No issues found**', formatted)
+    self.assertIn('ℹ️ **Run / Session ID:** `ctx-clean-pass-42`', formatted)
+    self.assertNotIn('Detailed inline comments', formatted)
+    self.assertIn(
+        '<!-- cloud-operator-context-id: ctx-clean-pass-42 -->', formatted
+    )
 
 
 if __name__ == '__main__':

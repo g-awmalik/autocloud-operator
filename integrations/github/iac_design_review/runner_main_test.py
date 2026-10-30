@@ -139,6 +139,14 @@ class RunnerMainTest(absltest.TestCase):
       pos_args, kwargs = mock_gh.post_pr_review.call_args
       posted_review_body = pos_args[2]
       self.assertIn('### Findings', posted_review_body)
+      self.assertIn(
+          'ℹ️ **Run / Session ID:** `ctx-inline-1`', posted_review_body
+      )
+      self.assertIn(
+          '👇 **Detailed inline comments and 1-click code suggestions are '
+          'added on the affected files below.**',
+          posted_review_body,
+      )
       self.assertNotIn('title="main.tf"', posted_review_body)
       self.assertNotIn('resource "google_storage_bucket"', posted_review_body)
       self.assertLen(kwargs['inline_comments'], 1)
@@ -315,6 +323,7 @@ class RunnerMainTest(absltest.TestCase):
 
     mock_gh = mock.MagicMock()
     mock_gh.list_issue_comments.return_value = []
+    mock_gh.has_open_companion_pr.return_value = False
     mock_gh.create_or_update_companion_pr.return_value = (
         'https://github.com/org/demo/pull/12'
     )
@@ -594,6 +603,75 @@ class RunnerMainTest(absltest.TestCase):
         '```suggestion\n  uniform_bucket_level_access = true\n```',
         sent_review['body'],
     )
+
+  @mock.patch.object(requests, 'post', autospec=True)
+  def test_runner_comment_only_mode_preserves_remediated_block_in_comment(
+      self, mock_post
+  ):
+    remediated_md = (
+        '### Summary\n'
+        'Enable uniform bucket-level access.\n\n'
+        '```hcl title="main.tf"\n'
+        'resource "google_storage_bucket" "b" {\n'
+        '  uniform_bucket_level_access = true\n'
+        '}\n'
+        '```\n'
+    )
+    rpc_response = {
+        'jsonrpc': '2.0',
+        'id': '1',
+        'result': {
+            'structuredContent': {
+                'content': remediated_md,
+                'context_id': 'ctx-comment-only',
+            }
+        },
+    }
+    mock_post.return_value = mock.MagicMock(
+        status_code=200, text=json.dumps(rpc_response)
+    )
+
+    mock_gh = mock.MagicMock()
+    mock_gh.list_pr_changed_files.return_value = ['main.tf']
+    mock_gh.list_pr_comments.return_value = []
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      cfg_path = _write_test_config(tmp_dir)
+      with open(cfg_path, 'a', encoding='utf-8') as cfg_file:
+        cfg_file.write(
+            'scenarios:\n  code_changes:\n    pr_mode: "comment_only"\n'
+        )
+      with open(
+          os.path.join(tmp_dir, 'main.tf'), 'w', encoding='utf-8'
+      ) as tf_file:
+        tf_file.write('resource "google_storage_bucket" "b" {}\n')
+
+      event_payload = {
+          'action': 'opened',
+          'pull_request': {
+              'number': 9,
+              'title': 'Add bucket',
+              'draft': False,
+              'author_association': 'OWNER',
+              'head': {'ref': 'feat/bucket'},
+          },
+      }
+      exit_code = runner_main.run_action(
+          workspace_dir=tmp_dir,
+          config_path=cfg_path,
+          event_name='pull_request',
+          event_payload=event_payload,
+          repo_full_name='org/demo',
+          mcp_url=mcp_client.DEFAULT_PROD_MCP_URL,
+          tokens=auth.StaticTokenSource('fake-static-token'),
+          github_client=mock_gh,
+          dry_run_github=False,
+      )
+      self.assertEqual(exit_code, 0)
+      mock_gh.post_issue_comment.assert_called_once()
+      posted_comment = mock_gh.post_issue_comment.call_args.args[2]
+      self.assertIn('title="main.tf"', posted_comment)
+      self.assertIn('uniform_bucket_level_access = true', posted_comment)
 
 
 if __name__ == '__main__':

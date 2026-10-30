@@ -210,8 +210,25 @@ class McpClientTest(absltest.TestCase):
         'IaC Review: Review Terraform against Google Best Practices',
         inline_prompt,
     )
+    self.assertIn(
+        '### Autocloud identified <N> risks in your Terraform', inline_prompt
+    )
+    self.assertIn(
+        '| Severity | Category | Finding & Affected Locations | Guidelines |',
+        inline_prompt,
+    )
+    self.assertIn('`⚠️ Disruptive`', inline_prompt)
+    self.assertIn('`🛠️ Action Required`', inline_prompt)
+    self.assertIn('✅ **No issues found**', inline_prompt)
     self.assertNotIn('docs/AGENTS.md', inline_prompt)
     self.assertIn('cloud-operator-inline-comments', inline_prompt)
+    self.assertIn('"finding_id": 1', inline_prompt)
+    self.assertIn('"total_changes_for_finding": 2', inline_prompt)
+    self.assertIn('"guideline_label":', inline_prompt)
+    self.assertIn('"key_changes": []', inline_prompt)
+    self.assertIn('"disruptive_warning":', inline_prompt)
+    self.assertIn('"cost_important":', inline_prompt)
+    self.assertIn('"action_required_caution":', inline_prompt)
     self.assertIn(
         '1: resource "google_storage_bucket" "b" {}', inline_prompt
     )

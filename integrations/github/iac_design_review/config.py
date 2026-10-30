@@ -558,17 +558,20 @@ def should_trigger_issue_implementation(
     if issue_assoc not in issue_cfg.allowed_author_associations:
       return False
 
+    if action == 'labeled':
+      if not issue_cfg.trigger_labels:
+        return False
+      allowed_labels = {lbl.lower() for lbl in issue_cfg.trigger_labels}
+      label_obj = event_payload.get('label')
+      added_name = (
+          str(label_obj.get('name', '')).strip().lower()
+          if isinstance(label_obj, Mapping)
+          else ''
+      )
+      return bool(added_name and added_name in allowed_labels)
+
     if issue_cfg.trigger_labels:
       allowed_labels = {lbl.lower() for lbl in issue_cfg.trigger_labels}
-      if action == 'labeled':
-        label_obj = event_payload.get('label')
-        added_name = (
-            str(label_obj.get('name', '')).strip().lower()
-            if isinstance(label_obj, Mapping)
-            else ''
-        )
-        if added_name:
-          return added_name in allowed_labels
       issue_labels = _extract_issue_label_names(issue)
       return bool(issue_labels & allowed_labels)
 

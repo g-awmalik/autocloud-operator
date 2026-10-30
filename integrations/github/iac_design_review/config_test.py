@@ -486,6 +486,26 @@ class ConfigTest(absltest.TestCase):
             labeled_cfg, 'issues', labeled_event_unrelated
         )
     )
+    # action == 'labeled' requires trigger_labels to be non-empty and added_name
+    # to be present in allowed_labels (does not fall back to existing labels).
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            enabled_no_labels_cfg, 'issues', labeled_event_match
+        )
+    )
+    labeled_event_missing_label = {
+        'action': 'labeled',
+        'issue': {
+            'number': 7,
+            'author_association': 'MEMBER',
+            'labels': [{'name': 'enhancement'}],
+        },
+    }
+    self.assertFalse(
+        config.should_trigger_issue_implementation(
+            labeled_cfg, 'issues', labeled_event_missing_label
+        )
+    )
 
     # On-demand /cloud-operator implement comment works on unlabeled Issue...
     issue_comment_payload = {
